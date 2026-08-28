@@ -1,0 +1,149 @@
+-- review.nvim :: thin GitHub client over the `gh` CLI (argv, shell=false).
+-- We call `gh api graphql`/`gh pr` directly rather than depending on octo (R3).
+
+local proc = require("review.util.proc")
+
+local M = {}
+
+--- True if the gh CLI is available.
+---@return boolean
+function M.available()
+  return (proc.run({ "gh", "--version" }))
+end
+
+--- Run a GraphQL query. `vars` is a map of name->string (gh -F/-f). Returns decoded
+--- data table or nil, err.
+---@param query string
+---@param vars table<string,string|integer>|nil
+---@param cwd string|nil
+---@return table|nil data, string|nil err
+function M.graphql(query, vars, cwd)
+  local argv = { "gh", "api", "graphql", "-f", "query=" .. query }
+  for k, v in pairs(vars or {}) do
+    if type(v) == "number" then
+      table.insert(argv, "-F")
+      table.insert(argv, string.format("%s=%d", k, v))
+    else
+      table.insert(argv, "-f")
+      table.insert(argv, string.format("%s=%s", k, v))
+    end
+  end
+  local ok, out, err = proc.run(argv, { cwd = cwd })
+  if not ok then
+    return nil, err
+  end
+  local decoded_ok, decoded = pcall(vim.json.decode, out)
+  if not decoded_ok then
+    return nil, "gh graphql: bad JSON"
+  end
+  return decoded.data, nil
+end
+
+--- owner, repo for the cwd's `origin`. Returns nil on failure.
+---@param cwd string|nil
+---@return string|nil owner, string|nil repo
+function M.owner_repo(cwd)
+  local ok, out = proc.run(
+    { "gh", "repo", "view", "--json", "owner,name", "-q", ".owner.login + \"/\" + .name" },
+    { cwd = cwd }
+  )
+  if not ok then
+    return nil
+  end
+  local slug = out:gsub("%s+$", "")
+  local owner, repo = slug:match("^([^/]+)/(.+)$")
+  return owner, repo
+end
+
+--- List open PRs (with optional search query). Returns a list of light PR records.
+---@param opts table|nil { search=string, limit=integer, state=string }
+---@param cwd string|nil
+---@return table[] prs, string|nil err
+function M.list_prs(opts, cwd)
+  opts = opts or {}
+  local argv = {
+    "gh", "pr", "list",
+    "--json", "number,title,author,state,isDraft,updatedAt,headRefName,baseRefName,labels,reviewDecision",
+    "--limit", tostring(opts.limit or 100),
+  }
+  if opts.state then
+    vim.list_extend(argv, { "--state", opts.state })
+  end
+  if opts.search and opts.search ~= "" then
+    vim.list_extend(argv, { "--search", opts.search })
+  end
+  local ok, out, err = proc.run(argv, { cwd = cwd })
+  if not ok then
+    return {}, err
+  end
+  local decoded_ok, prs = pcall(vim.json.decode, out)
+  if not decoded_ok then
+    return {}, "gh pr list: bad JSON"
+  end
+  return prs, nil
+end
+
+--- Full detail for one PR number.
+---@param number integer
+---@param cwd string|nil
+---@return table|nil pr, string|nil err
+function M.pr_view(number, cwd)
+  local fields = "number,title,body,author,state,isDraft,updatedAt,createdAt,"
+    .. "headRefName,baseRefName,headRefOid,baseRefOid,labels,assignees,"
+    .. "reviewRequests,reviews,reviewDecision,statusCheckRollup,commits,files,mergeable"
+  local ok, out, err = proc.run(
+    { "gh", "pr", "view", tostring(number), "--json", fields },
+    { cwd = cwd }
+  )
+  if not ok then
+    return nil, err
+  end
+  local decoded_ok, pr = pcall(vim.json.decode, out)
+  if not decoded_ok then
+    return nil, "gh pr view: bad JSON"
+  end
+  return pr, nil
+end
+
+-- GraphQL to fetch review threads (comments, positions, resolution, suggestions live
+-- inside comment bodies as ```suggestion blocks — no dedicated field, per R3).
+local THREADS_QUERY = [[
+query($owner:String!, $repo:String!, $number:Int!) {
+  repository(owner:$owner, name:$repo) {
+    pullRequest(number:$number) {
+      reviewThreads(first:100) {
+        nodes {
+          id isResolved isOutdated path line originalLine diffSide
+          comments(first:100) {
+            nodes {
+              id databaseId author { login } body createdAt
+              path originalLine line diffHunk
+            }
+          }
+        }
+      }
+    }
+  }
+}]]
+
+--- Fetch review threads for a PR. Returns normalized list, or {}, err.
+---@param owner string
+---@param repo string
+---@param number integer
+---@param cwd string|nil
+---@return table[] threads, string|nil err
+function M.review_threads(owner, repo, number, cwd)
+  local data, err = M.graphql(THREADS_QUERY, { owner = owner, repo = repo, number = number }, cwd)
+  if not data then
+    return {}, err
+  end
+  local ok, nodes = pcall(function()
+    return data.repository.pullRequest.reviewThreads.nodes
+  end)
+  if not ok or not nodes then
+    return {}, "unexpected threads shape"
+  end
+  return nodes, nil
+end
+
+return M

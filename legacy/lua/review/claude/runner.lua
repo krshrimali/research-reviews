@@ -1,0 +1,269 @@
+-- review.nvim :: async Claude review runner.
+--
+-- Spawns `claude -p --output-format stream-json`, streams progress into the session
+-- record, and on completion parses the findings contract and applies it to the store
+-- idempotently (design gap #10). Tool access is gated (gap #5); edits run in a
+-- worktree and are never pushed.
+
+local proc = require("review.util.proc")
+local contract = require("review.claude.contract")
+local worktree = require("review.worktree")
+local util = require("review.util")
+local config = require("review.config")
+
+local M = {}
+
+-- Track live jobs so we can kill them on VimLeavePre (R5).
+M.jobs = {}
+
+-- Read-only tool allowlist. The full diff is already in the prompt, so we deliberately
+-- do NOT grant `git diff`/`git show` here: `git diff --output=<path>` and `--ext-diff`
+-- are file-write / command-exec vectors that would break read-only (security H1).
+-- Claude Bash patterns are prefix globs, so subcommands need a `:*` suffix.
+local READONLY_TOOLS = { "Read", "Grep", "Glob", "Bash(git log:*)" }
+--- Additional tools when edits are permitted — explicit subcommands, never a git wildcard.
+local EDIT_TOOLS = {
+  "Edit", "Write", "MultiEdit",
+  "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)",
+  "Bash(git diff:*)", "Bash(git worktree:*)",
+}
+--- Always denied — belt-and-suspenders against push / history rewrite (security H1).
+local DENY_TOOLS = {
+  "Bash(git push:*)", "Bash(git push)",
+  "Bash(git reset:*)", "Bash(git rebase:*)",
+}
+
+--- Apply a parsed findings table to the store. Idempotent per session.
+---@param store table
+---@param source table
+---@param session table   -- SessionRecord (mutated)
+---@param findings table
+local function apply_findings(store, source, session, findings)
+  if session.applied then
+    return
+  end
+  session.verdict = findings.verdict
+  session.summary = findings.summary
+  session.findings = session.findings or {}
+
+  -- Head-drift guard (gap #3): if head moved, warn; thread_replies still apply by id.
+  local drifted = findings.reviewed_head_sha and findings.reviewed_head_sha ~= source:head_rev()
+  if drifted then
+    table.insert(session.findings, {
+      general = true,
+      note = "⚠ head advanced since review; new_comment line numbers may be approximate.",
+    })
+  end
+
+  -- Thread replies (comment_id is a local uuid).
+  for _, r in ipairs(findings.thread_replies or {}) do
+    local target = store:get(r.comment_id)
+    if target then
+      store:reply(r.comment_id, r.reply, { origin = "claude", suggestion_text = r.suggestion })
+      table.insert(session.replied, r.comment_id)
+    else
+      -- Unmatched id: never drop — becomes a general finding (gap #6).
+      table.insert(session.findings, {
+        general = true,
+        note = string.format("reply to unknown comment_id %s: %s", tostring(r.comment_id), r.reply),
+      })
+    end
+  end
+
+  -- New Claude-authored comments.
+  for _, nc in ipairs(findings.new_comments or {}) do
+    local c = store:add({
+      file = nc.file,
+      side = nc.side or "RIGHT",
+      line_start = nc.line_start or 1,
+      line_end = nc.line_end or nc.line_start or 1,
+      body = nc.body or "",
+      kind = nc.suggestion and "suggestion" or "normal",
+      suggestion_text = nc.suggestion,
+      origin = "claude",
+    })
+    table.insert(session.findings, { comment_id = c.id, file = nc.file, line = nc.line_start })
+  end
+
+  -- Auto-resolve (only honored if the run enabled it).
+  if session.auto_resolve then
+    for _, id in ipairs(findings.resolved or {}) do
+      if store:get(id) then
+        store:set_resolved(id, true)
+      end
+    end
+  end
+
+  session.commits = findings.commits or {}
+  session.applied = true
+  store.sessions[session.id] = session
+  store:save()
+end
+
+--- Start a review. Returns the session record immediately; runs async.
+---@param opts table {
+---   store table, source table, instruction string,
+---   auto_resolve boolean, allow_edits boolean,
+---   included_threads table[]|nil,   -- root comments to include (default: all non-resolved)
+---   on_progress fun(session, text)|nil, on_done fun(session)|nil }
+---@return table session
+function M.start(opts)
+  local store, source = opts.store, opts.source
+  local cfg = config.get().claude
+  local session_id = util.uuid()
+
+  -- Flatten included threads (roots + their replies) for the prompt.
+  local roots = opts.included_threads
+  if not roots then
+    roots = {}
+    for _, r in ipairs(store:all_threads()) do
+      if r.status ~= "resolved" then
+        table.insert(roots, r)
+      end
+    end
+  end
+
+  local diff = contract.build_diff(source)
+  local user_prompt = contract.user_prompt({
+    source = source,
+    diff = diff,
+    threads = roots,
+    instruction = opts.instruction,
+    auto_resolve = opts.auto_resolve,
+    allow_edits = opts.allow_edits,
+  })
+
+  -- Working directory: a worktree at head when edits are allowed (isolation + safety).
+  local meta = source:metadata()
+  local cwd = meta.repo_root
+  if opts.allow_edits then
+    local wt, err = worktree.ensure(meta.repo_root, source:head_rev())
+    if wt then
+      cwd = wt
+    else
+      util.notify("could not create edit worktree: " .. tostring(err), vim.log.levels.WARN)
+    end
+  end
+
+  -- Build argv.
+  local tools = vim.deepcopy(READONLY_TOOLS)
+  if opts.allow_edits then
+    vim.list_extend(tools, EDIT_TOOLS)
+  end
+  local argv = {
+    cfg.bin, "-p",
+    "--output-format", "stream-json",
+    "--verbose",
+    "--session-id", session_id,
+    "--append-system-prompt", contract.system_prompt(),
+    "--allowedTools", table.concat(tools, ","),
+    "--disallowedTools", table.concat(DENY_TOOLS, ","),
+    -- Never auto-accept anything not explicitly allowed above.
+    "--permission-mode", opts.allow_edits and "acceptEdits" or "default",
+  }
+  if cfg.model then
+    vim.list_extend(argv, { "--model", cfg.model })
+  end
+  vim.list_extend(argv, cfg.extra_args or {})
+
+  local session = {
+    id = session_id,
+    source_key = source:key(),
+    state = "running",
+    instruction = opts.instruction,
+    allow_edits = opts.allow_edits or false,
+    auto_resolve = opts.auto_resolve or false,
+    started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"),
+    cwd = cwd,
+    replied = {},
+    findings = {},
+    log = {},
+    applied = false,
+  }
+  store.sessions[session_id] = session
+  store:save()
+
+  local result_text = ""
+  local handle = proc.spawn(argv, {
+    cwd = cwd,
+    stdin = user_prompt,
+    on_stdout = function(line)
+      local ev = contract.parse_stream_line(line)
+      if not ev then
+        return
+      end
+      if ev.kind == "progress" and ev.text and ev.text ~= "" then
+        table.insert(session.log, ev.text)
+        if opts.on_progress then
+          opts.on_progress(session, ev.text)
+        end
+      elseif ev.kind == "result" then
+        result_text = ev.text or ""
+      end
+    end,
+  }, function(ok, _, stderr, code)
+    M.jobs[session_id] = nil
+    session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    if not ok then
+      session.state = "error"
+      session.error = string.format("claude exited %d: %s", code, (stderr or ""):sub(1, 500))
+      store.sessions[session_id] = session
+      store:save()
+      util.notify("Claude review failed: " .. session.error, vim.log.levels.ERROR)
+      if opts.on_done then
+        opts.on_done(session)
+      end
+      return
+    end
+    local findings, ferr = contract.extract_findings(result_text)
+    if not findings then
+      session.state = "error"
+      session.error = "parse: " .. tostring(ferr)
+      session.raw_result = result_text
+      store.sessions[session_id] = session
+      store:save()
+      util.notify("Claude review parse error: " .. tostring(ferr), vim.log.levels.ERROR)
+      if opts.on_done then
+        opts.on_done(session)
+      end
+      return
+    end
+    apply_findings(store, source, session, findings)
+    session.state = "done"
+    store.sessions[session_id] = session
+    store:save()
+    util.notify(string.format("Review done: %s — %s",
+      source:title(), findings.verdict or "commented"),
+      findings.verdict == "request_changes" and vim.log.levels.WARN or vim.log.levels.INFO)
+    if opts.on_done then
+      opts.on_done(session)
+    end
+  end)
+
+  M.jobs[session_id] = handle
+  return session
+end
+
+--- Kill a running session.
+---@param session_id string
+function M.kill(session_id)
+  local h = M.jobs[session_id]
+  if h then
+    pcall(function()
+      h:kill(15)
+    end)
+    M.jobs[session_id] = nil
+  end
+end
+
+--- Kill all running jobs (VimLeavePre).
+function M.kill_all()
+  for id, h in pairs(M.jobs) do
+    pcall(function()
+      h:kill(15)
+    end)
+    M.jobs[id] = nil
+  end
+end
+
+return M

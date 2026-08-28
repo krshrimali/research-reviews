@@ -1,0 +1,82 @@
+/* prtui :: GitHub-in-terminal theme */
+
+Screen {
+    background: $surface;
+}
+
+/* --- source list --- */
+#list-filter {
+    dock: top;
+    border: round $primary;
+    margin: 0 1;
+}
+#source-table {
+    margin: 0 1;
+    height: 1fr;
+}
+
+/* --- review layout --- */
+#review-body {
+    height: 1fr;
+}
+#sidebar {
+    width: 34;
+    border-right: solid $panel-lighten-2;
+}
+#file-tree {
+    height: 2fr;
+    border-bottom: solid $panel-lighten-2;
+    padding: 0 1;
+}
+#commit-list {
+    height: 1fr;
+    padding: 0 1;
+}
+#sidebar .section-title {
+    color: $text-muted;
+    text-style: bold;
+    padding: 0 1;
+    background: $panel;
+}
+
+#main-tabs {
+    width: 1fr;
+}
+
+/* conversation */
+.conv-title { text-style: bold; color: $accent; padding: 1 2 0 2; }
+.conv-meta { color: $text-muted; padding: 0 2 1 2; }
+.thread {
+    border: round $panel-lighten-2;
+    margin: 1 2;
+    padding: 0 1;
+}
+.thread-head { text-style: bold; color: $accent; }
+.thread-resolved { color: $success; }
+.thread-unresolved { color: $warning; }
+
+/* diff */
+#diff-scroll { padding: 0 1; height: 1fr; }
+
+/* claude */
+#claude-scroll { padding: 0 1; height: 1fr; }
+.verdict-approve { color: $success; text-style: bold; }
+.verdict-changes { color: $error; text-style: bold; }
+.verdict-comment { color: $warning; text-style: bold; }
+
+/* modals */
+ComposeModal, ClaudeModal, HelpModal {
+    align: center middle;
+}
+#compose-box, #claude-box, #help-box {
+    width: 80%;
+    max-width: 100;
+    height: auto;
+    max-height: 80%;
+    border: round $primary;
+    background: $panel;
+    padding: 1 2;
+}
+#compose-box TextArea { height: 12; margin: 1 0; }
+.modal-title { text-style: bold; color: $accent; }
+.hint { color: $text-muted; }

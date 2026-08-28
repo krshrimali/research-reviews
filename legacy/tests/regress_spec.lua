@@ -1,0 +1,71 @@
+-- Regression tests for bugs found in code review.
+local fixture = require("tests.fixture")
+
+local function setup()
+  local dir = fixture.create()
+  local Src = require("review.source")
+  local source = assert(Src.create(".", dir, { base = "main" }))
+  local store = require("review.comments.store").for_source(source)
+  return dir, source, store
+end
+
+describe("deletion persistence (tombstones)", function()
+  it("a deleted comment does not resurrect after reload", function()
+    local _, source, store = setup()
+    local c = store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 2, body = "x" })
+    store:reply(c.id, "r")
+    store:delete(c.id)
+    -- Reload from disk: neither root nor reply should return.
+    local store2 = require("review.comments.store").for_source(source)
+    assert.is_nil(store2:get(c.id))
+    assert.equals(0, #store2:threads_for_file("src/auth.lua"))
+    -- Adding another comment (which triggers save/merge) must not bring it back.
+    store2:add({ file = "src/auth.lua", side = "RIGHT", line_start = 3, body = "y" })
+    local store3 = require("review.comments.store").for_source(source)
+    assert.is_nil(store3:get(c.id))
+    assert.equals(1, #store3:threads_for_file("src/auth.lua"))
+  end)
+end)
+
+describe("github_sync preserves local resolution", function()
+  it("does not revert a locally-resolved thread on re-import", function()
+    local _, source, store = setup()
+    -- Fake source exposing an unresolved upstream thread.
+    local node = {
+      id = "T1",
+      isResolved = false,
+      path = "src/auth.lua",
+      line = 2,
+      diffSide = "RIGHT",
+      comments = { nodes = { { id = "C1", author = { login = "alice" }, body = "hi", createdAt = "2026-01-01T00:00:00Z" } } },
+    }
+    local fake = {
+      threads = function() return { node } end,
+      metadata = function() return source:metadata() end,
+      base_rev = function() return source:base_rev() end,
+      head_rev = function() return source:head_rev() end,
+    }
+    local sync = require("review.comments.github_sync")
+    assert.equals(1, sync.import(fake, store))
+    -- Find the imported root and resolve it locally.
+    local root
+    for _, c in pairs(store.comments) do
+      if c.github_id == "C1" then root = c end
+    end
+    assert.is_truthy(root)
+    store:set_resolved(root.id, true)
+    -- Re-import (upstream still unresolved) must NOT revert local resolution.
+    sync.import(fake, store)
+    assert.equals("resolved", store:get(root.id).status)
+  end)
+end)
+
+describe("reanchor leaves LEFT-side file paths alone on rename", function()
+  it("does not rewrite c.file for LEFT comments", function()
+    local _, source, store = setup()
+    local c = store:add({ file = "old.lua", side = "LEFT", line_start = 1, body = "z" })
+    -- Force a rename map old.lua -> new.lua.
+    store:reanchor({ ["old.lua"] = "new.lua" })
+    assert.equals("old.lua", store:get(c.id).file)
+  end)
+end)
