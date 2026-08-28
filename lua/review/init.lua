@@ -409,13 +409,17 @@ function M.sync_claude_result()
     util.notify("could not synchronize Claude findings: " .. tostring(err), vim.log.levels.ERROR)
     return
   end
-  require("review.claude.runner").apply_findings(M.current.store, M.current.source, session, findings)
+  require("review.sidekick").apply_findings(M.current.store, M.current.source, session, findings)
   session.state, session.progress = "done", "Findings imported from transcript"
   session.error = nil
   M.current.store.sessions[session.id] = session
   M.current.store:save()
   require("review.ui.diff").refresh_markers(M.current.store)
-  M.toggle_comments_panel(true)
+  if session.diffview_applied then
+    require("review.ui.comments_panel").close()
+  else
+    M.toggle_comments_panel(true)
+  end
   util.notify(string.format("Claude review synchronized · %d findings · %d replies",
     #(session.findings or {}), #(session.replied or {})))
 end
@@ -460,7 +464,9 @@ local function open_final_prompt(instruction, allow_edits, threads)
       on_progress = function() require("review.ui.diff").refresh_markers(M.current.store) end,
       on_done = function(done)
         require("review.ui.diff").refresh_markers(M.current.store)
-        if done.applied and (#(done.findings or {}) > 0 or #(done.replied or {}) > 0) then
+        if done.diffview_applied then
+          require("review.ui.comments_panel").close()
+        elseif done.applied and (#(done.findings or {}) > 0 or #(done.replied or {}) > 0) then
           M.toggle_comments_panel(true)
         elseif require("review.ui.comments_panel").is_open() then
           require("review.ui.comments_panel").render(M.current.store, nil, "RIGHT")

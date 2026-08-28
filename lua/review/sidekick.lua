@@ -50,13 +50,49 @@ end
 
 function M.prompt(source, store, opts)
   opts = opts or {}
+  local threads = roots_with_replies(store, opts.threads)
+  -- Diffview-native comments are the annotations users see as REVIEW #n. Include
+  -- them in whole-review prompts so the agent can answer those exact threads.
+  if not opts.threads then
+    local ok, dv_review = pcall(require, "diffview.review")
+    if ok and dv_review.agent_threads then
+      vim.list_extend(threads, dv_review.agent_threads())
+    end
+  end
   return contract.system_prompt() .. "\n\n" .. contract.user_prompt({
     source = source,
-    threads = roots_with_replies(store, opts.threads),
+    threads = threads,
     instruction = opts.instruction or "",
     auto_resolve = opts.auto_resolve or false,
     allow_edits = opts.allow_edits or false,
   })
+end
+
+---Apply findings to both the native Diffview annotations and review.nvim's store.
+function M.apply_findings(store, source, session, findings)
+  local runner_findings = vim.deepcopy(findings)
+  local ok, dv_review = pcall(require, "diffview.review")
+  if ok and dv_review.apply_agent_findings and not session.diffview_applied then
+    local added, replied = dv_review.apply_agent_findings(findings)
+    if added ~= nil then
+      runner_findings.new_comments = {}
+      runner_findings.thread_replies = vim.tbl_filter(function(reply)
+        return not tostring(reply.comment_id or ""):match("^diffview:")
+      end, runner_findings.thread_replies or {})
+      for _, reply in ipairs(findings.thread_replies or {}) do
+        if tostring(reply.comment_id or ""):match("^diffview:") then
+          session.replied[#session.replied + 1] = reply.comment_id
+        end
+      end
+      for _, comment in ipairs(findings.new_comments or {}) do
+        session.findings[#session.findings + 1] = {
+          diffview = true, file = comment.file, line = comment.line_start,
+        }
+      end
+      session.diffview_applied = true
+    end
+  end
+  require("review.claude.runner").apply_findings(store, source, session, runner_findings)
 end
 
 ---Start a Sidekick CLI session pinned to the repository or an explicitly consented
@@ -117,7 +153,7 @@ function M.run(source, store, prompt, opts)
     local exact = M.transcript_result(source, cwd)
     local findings = require("review.claude.contract").extract_findings(exact or text)
     if findings and findings.reviewed_head_sha then
-      require("review.claude.runner").apply_findings(store, source, session, findings)
+      M.apply_findings(store, source, session, findings)
       session.state = "done"
       session.progress = "Findings imported"
       session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")

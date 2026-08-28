@@ -97,4 +97,18 @@ describe("claude runner (fake claude)", function()
     local findings = require("review.claude.contract").extract_findings(result)
     assert.equals(source:head_rev(), findings.reviewed_head_sha)
   end)
+
+  it("includes native Diffview comments in whole-review prompts", function()
+    local previous = package.loaded["diffview.review"]
+    package.loaded["diffview.review"] = {
+      agent_threads = function()
+        return { { id = "diffview:2", file = "src/auth.lua", line_start = 2,
+          side = "RIGHT", author = "you", body = "What is this doing?", replies = {} } }
+      end,
+    }
+    local prompt = require("review.sidekick").prompt(source, store, { instruction = "check" })
+    package.loaded["diffview.review"] = previous
+    assert.is_truthy(prompt:find("comment_id: diffview:2", 1, true))
+    assert.is_truthy(prompt:find("What is this doing?", 1, true))
+  end)
 end)
