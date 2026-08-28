@@ -26,6 +26,8 @@ provides direct mappings without duplicating any existing mapping:
 - `,ps` agent sessions
 - `,pl` pick PR/branch
 - `,px` clean safe worktrees
+- `,pi` import GitHub comments
+- `,pq` export clickable threads to quickfix
 
 - **Outside a review:** `<leader>p` → "Start a review (pick PR / branch)".
 - **Inside a review:** `<leader>p` opens a **contextual menu** of just the actions valid

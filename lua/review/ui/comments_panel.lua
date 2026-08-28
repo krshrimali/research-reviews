@@ -88,8 +88,8 @@ local function build(store, file, filter, query, selected)
     for _, note in ipairs(general) do table.insert(lines, "  ★ " .. note) end
   end
   table.insert(lines, "")
-  table.insert(lines, "<CR> open · Space select · a ask Claude · p publish · f filter · / search")
-  table.insert(lines, "r resolve · e edit · d delete · y copy · q close")
+  table.insert(lines, "<CR> open · Space select · a ask Claude · p publish · I import")
+  table.insert(lines, "f filter · / search · Q quickfix · r resolve · e edit · d delete · y copy · q close")
   return lines, map
 end
 
@@ -183,6 +183,12 @@ function M.open(store, file, side, on_jump)
   end)
   map("z", function()
     require("review").react_to_thread(state.line_map[vim.api.nvim_win_get_cursor(0)[1]])
+  end)
+  map("I", function() require("review").import_github_comments() end)
+  map("Q", function()
+    local roots = {}
+    for _, root in pairs(state.line_map) do roots[root.id] = root end
+    require("review").threads_to_quickfix(vim.tbl_values(roots))
   end)
   map("d", function()
     local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]

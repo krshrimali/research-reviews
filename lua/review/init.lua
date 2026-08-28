@@ -58,12 +58,16 @@ function M._attach_diff_buffer(bufnr)
     { buffer = bufnr, desc = "review: next unresolved thread" })
   pcall(vim.keymap.set, "n", "[u", function() M.navigate_thread(-1, true) end,
     { buffer = bufnr, desc = "review: previous unresolved thread" })
-  pcall(vim.keymap.set, "n", "v", M.toggle_viewed,
+  pcall(vim.keymap.set, "n", "<localleader>v", M.toggle_viewed,
     { buffer = bufnr, desc = "review: toggle file viewed" })
   pcall(vim.keymap.set, "n", "o", function() M.open_at_commit(false) end,
     { buffer = bufnr, desc = "review: open file at reviewed commit" })
   pcall(vim.keymap.set, "n", "O", function() M.open_at_commit(true) end,
     { buffer = bufnr, desc = "review: open file at reviewed commit in new tab" })
+  local esc = vim.fn.maparg("<Esc>", "n", false, true)
+  if esc and esc.buffer == 1 and tostring(esc.rhs or ""):match("close") then
+    pcall(vim.keymap.del, "n", "<Esc>", { buffer = bufnr })
+  end
 
   -- Render existing markers for this specific diff buffer.
   diff.refresh_markers(store)
@@ -295,6 +299,8 @@ function M.menu()
   items[#items + 1] = { key = "a", label = "Open/toggle agent chat", fn = M.toggle_chat }
   items[#items + 1] = { key = "Y", label = "Edit, copy, or run final prompt", fn = M.copy_prompt }
   items[#items + 1] = { key = "f", label = "Refresh PR and comments", fn = M.refresh }
+  items[#items + 1] = { key = "i", label = "Import GitHub comments", fn = M.import_github_comments }
+  items[#items + 1] = { key = "q", label = "Export threads to quickfix", fn = M.threads_to_quickfix }
   items[#items + 1] = { key = "R", label = "Claude review sessions", fn = M.claude_sessions }
   items[#items + 1] = { key = "O", label = "Overview (description, commits, threads)", fn = M.show_overview }
   items[#items + 1] = { key = "P", label = "Toggle comments panel", fn = M.toggle_comments_panel }
@@ -371,6 +377,46 @@ function M.refresh()
   util.notify(string.format("refreshed · head %s · %s%d new thread%s", before_head == fresh:head_rev()
     and "unchanged" or ("advanced to " .. fresh:head_rev():sub(1, 8)), new_threads >= 0 and "+" or "",
     new_threads, math.abs(new_threads) == 1 and "" or "s"))
+end
+
+function M.import_github_comments()
+  if not M.current or M.current.source:kind() ~= "pr" then
+    util.notify("GitHub comment import requires a PR", vim.log.levels.WARN); return
+  end
+  M.current.source._threads = nil
+  local imported = require("review.comments.github_sync").import(M.current.source, M.current.store)
+  require("review.ui.diff").refresh_markers(M.current.store)
+  if require("review.ui.comments_panel").is_open() then
+    require("review.ui.comments_panel").render(M.current.store, nil, "RIGHT")
+  end
+  util.notify(string.format("GitHub comments imported · %d new", imported))
+end
+
+function M.threads_to_quickfix(threads)
+  if not M.current then return end
+  threads = threads or M.current.store:all_threads()
+  local repo_root = M.current.source:metadata().repo_root
+  local items = {}
+  for _, thread in ipairs(threads) do
+    items[#items + 1] = {
+      filename = vim.fs.joinpath(repo_root, thread.file), lnum = thread.line_start or 1,
+      text = string.format("[%s/%s] %s: %s", thread.status or "draft", thread.origin or "local",
+        thread.author or "?", (thread.body or ""):gsub("\n", " ")),
+      user_data = { review_thread = thread },
+    }
+  end
+  vim.fn.setqflist({}, "r", { title = "Review threads · " .. M.current.source:title(), items = items })
+  vim.cmd("copen")
+  local qfbuf = vim.api.nvim_get_current_buf()
+  vim.keymap.set("n", "<CR>", function()
+    local qf = vim.fn.getqflist({ idx = 0, items = 0 })
+    local item = qf.items[qf.idx]
+    local thread = item and item.user_data and item.user_data.review_thread
+    if thread then
+      vim.cmd("cclose")
+      require("diffview").open_review_location({ path = thread.file, side = thread.side, line = thread.line_start })
+    end
+  end, { buffer = qfbuf, desc = "open review thread in diff" })
 end
 
 local function open_final_prompt(instruction, allow_edits, threads)
@@ -461,13 +507,22 @@ function M.claude_review()
   local cfg = config.get().claude
   local names = vim.tbl_keys(cfg.saved_instructions or {})
   table.insert(names, 1, "(none)")
+  table.insert(names, 2, "Custom instructions…")
   vim.ui.select(names, { prompt = "Saved instruction profile:" }, function(choice)
-    local base = (choice and choice ~= "(none)") and cfg.saved_instructions[choice] or ""
-    vim.ui.select({ "Read-only review", "Allow edits in repository-local worktree" },
-      { prompt = "Agent permissions:" }, function(permission)
-      if not permission then return end
-      open_final_prompt(base, permission:match("^Allow") ~= nil)
-    end)
+    if not choice then return end
+    local function permissions(instruction)
+      vim.ui.select({ "Read-only review", "Allow edits in repository-local worktree" },
+        { prompt = "Agent permissions:" }, function(permission)
+        if permission then open_final_prompt(instruction, permission:match("^Allow") ~= nil) end
+      end)
+    end
+    if choice == "Custom instructions…" then
+      require("review.ui.compose").open({ title = "Custom review instructions", on_submit = function(body)
+        permissions(body)
+      end })
+    else
+      permissions(choice ~= "(none)" and cfg.saved_instructions[choice] or "")
+    end
   end)
 end
 

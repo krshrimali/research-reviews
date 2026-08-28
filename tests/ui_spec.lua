@@ -100,6 +100,20 @@ describe("review progress", function()
     assert.is_truthy(text:find("src/auth.lua", 1, true))
     assert.is_truthy(text:find("src/cache.cpp", 1, true))
     assert.is_truthy(text:find("Space select", 1, true))
+    assert.is_truthy(text:find("quickfix", 1, true))
+    local called = false
+    local review = require("review")
+    local original = review.ask_claude_threads
+    review.ask_claude_threads = function(threads) called = #threads == 1 end
+    local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+    for i, line in ipairs(lines) do
+      if line:find("src/auth.lua", 1, true) then vim.api.nvim_win_set_cursor(0, { i, 0 }); break end
+    end
+    local mapping = vim.fn.maparg("a", "n", false, true)
+    assert.equals("function", type(mapping.callback))
+    mapping.callback()
+    review.ask_claude_threads = original
+    assert.is_true(called, "panel a mapping should pass the thread under cursor")
     panel.close()
   end)
 end)

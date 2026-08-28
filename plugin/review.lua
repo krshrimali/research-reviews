@@ -40,6 +40,10 @@ vim.api.nvim_create_user_command("ReviewChat", function() review().toggle_chat()
   { desc = "Toggle the Sidekick review chat" })
 vim.api.nvim_create_user_command("ReviewPrompt", function() review().copy_prompt() end,
   { desc = "Edit, copy, or run the review prompt" })
+vim.api.nvim_create_user_command("ReviewImport", function() review().import_github_comments() end,
+  { desc = "Import or refresh GitHub review comments" })
+vim.api.nvim_create_user_command("ReviewQuickfix", function() review().threads_to_quickfix() end,
+  { desc = "Export review threads to quickfix" })
 
 -- :ReviewClean — prune managed worktrees (keeps unpushed ones).
 vim.api.nvim_create_user_command("ReviewClean", function()

@@ -16,6 +16,12 @@ describe("prompt construction", function()
     assert.is_truthy(prompt:find("git diff --no-ext-diff --no-textconv base123...head123 --", 1, true))
     assert.is_nil(prompt:find("```diff", 1, true))
   end)
+
+  it("requires a readable review before the machine sync payload", function()
+    local prompt = contract.system_prompt()
+    assert.is_truthy(prompt:find("human%-readable Markdown review"))
+    assert.is_truthy(prompt:find("editor consumes the JSON internally", 1, true))
+  end)
 end)
 
 describe("parse_stream_line", function()
