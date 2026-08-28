@@ -1,6 +1,17 @@
 local list = require("review.ui.list")
 
 describe("review source quickfix", function()
+  it("provides actionable state, source, search, and refresh filters", function()
+    local rows = list._filter_rows({ state = "open", source = "both", search = "author:me" })
+    local labels = vim.tbl_map(function(row) return row.label end, rows)
+    local text = table.concat(labels, "\n")
+    assert.is_truthy(text:find("Search: author:me", 1, true))
+    assert.is_truthy(text:find("State: open", 1, true))
+    assert.is_truthy(text:find("State: merged", 1, true))
+    assert.is_truthy(text:find("Sources: branches", 1, true))
+    assert.is_truthy(text:find("Refresh results", 1, true))
+  end)
+
   it("retains source metadata and opens the selected review", function()
     local cwd = vim.fn.getcwd()
     local items = {

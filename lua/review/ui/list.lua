@@ -111,8 +111,88 @@ function M.gather_items(cwd, opts)
   if not opts.branches_only then
     vim.list_extend(items, pr_items(cwd, opts))
   end
-  vim.list_extend(items, local_branches(cwd))
+  if not opts.prs_only then vim.list_extend(items, local_branches(cwd)) end
   return items
+end
+
+local function filter_rows(filters)
+  local rows = {
+    { action = "search", label = "⌕  Search: " .. (filters.search ~= "" and filters.search or "(none)") },
+    { action = "clear", label = "×  Clear search" },
+    { action = "refresh", label = "↻  Refresh results" },
+  }
+  for _, state in ipairs({ "open", "closed", "merged", "all" }) do
+    rows[#rows + 1] = {
+      action = "state", value = state,
+      label = string.format("%s  State: %s", filters.state == state and "●" or "○", state),
+    }
+  end
+  for _, source in ipairs({ "both", "prs", "branches" }) do
+    rows[#rows + 1] = {
+      action = "source", value = source,
+      label = string.format("%s  Sources: %s", filters.source == source and "●" or "○", source),
+    }
+  end
+  return rows
+end
+
+M._filter_rows = filter_rows
+
+---Always-visible, actionable quickfix picker. Filter rows mutate and rebuild the
+---same list; result rows open reviews.
+function M.open_quickfix(cwd, on_choose)
+  local filters = { state = "open", source = "both", search = "" }
+  local render
+  render = function()
+    local opts = {
+      state = filters.state,
+      search = filters.search,
+      branches_only = filters.source == "branches",
+      prs_only = filters.source == "prs",
+    }
+    local results = M.gather_items(cwd, opts)
+    local qf = {}
+    for _, row in ipairs(filter_rows(filters)) do
+      qf[#qf + 1] = {
+        filename = cwd, lnum = 1, text = "[filter] " .. row.label,
+        user_data = { review_filter = row },
+      }
+    end
+    for _, item in ipairs(results) do
+      qf[#qf + 1] = {
+        filename = cwd, lnum = 1, text = item.label,
+        user_data = { review_source = item },
+      }
+    end
+    vim.fn.setqflist({}, "r", {
+      title = string.format("Review · %s · %s", filters.state, filters.source), items = qf,
+    })
+    vim.cmd("botright copen")
+    local buf = vim.api.nvim_get_current_buf()
+    vim.keymap.set("n", "<CR>", function()
+      local info = vim.fn.getqflist({ idx = 0, items = 0 })
+      local entry = info.items[info.idx]
+      local data = entry and entry.user_data or {}
+      if data.review_source then
+        vim.cmd("cclose")
+        on_choose(data.review_source)
+      elseif data.review_filter then
+        local row = data.review_filter
+        if row.action == "state" then filters.state = row.value
+        elseif row.action == "source" then filters.source = row.value
+        elseif row.action == "clear" then filters.search = ""
+        elseif row.action == "search" then
+          vim.ui.input({ prompt = "Review search: ", default = filters.search }, function(value)
+            if value ~= nil then filters.search = vim.trim(value); render() end
+          end)
+          return
+        end
+        render()
+      end
+    end, { buffer = buf, nowait = true, desc = "apply review filter or open review" })
+    vim.keymap.set("n", "r", render, { buffer = buf, nowait = true, desc = "refresh review list" })
+  end
+  render()
 end
 
 --- Present items via the configured picker; call on_choose(item).
@@ -219,6 +299,10 @@ end
 ---@param on_choose fun(item:table)
 function M.open(cwd, opts, on_choose)
   cwd = cwd or vim.fn.getcwd()
+  if not opts or opts.quickfix ~= false then
+    M.open_quickfix(cwd, on_choose)
+    return
+  end
   local items = M.gather_items(cwd, opts or {})
   if #items == 0 then
     util.notify("no PRs or branches found", vim.log.levels.WARN)
