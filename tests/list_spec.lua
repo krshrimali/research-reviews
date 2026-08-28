@@ -1,7 +1,7 @@
 local list = require("review.ui.list")
 
 describe("review source quickfix", function()
-  it("cycles picker PR states in order", function()
+  it("cycles picker states in the documented order", function()
     assert.equals("closed", list._next_state("open"))
     assert.equals("merged", list._next_state("closed"))
     assert.equals("all", list._next_state("merged"))
