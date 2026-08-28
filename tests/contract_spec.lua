@@ -1,6 +1,23 @@
 -- Tests for the Claude contract: stream-json parsing + findings extraction.
 local contract = require("review.claude.contract")
 
+describe("prompt construction", function()
+  it("keeps conversations but replaces huge embedded diffs with a safe command", function()
+    local source = {
+      title = function() return "PR" end,
+      head_rev = function() return "head123" end,
+      base_rev = function() return "base123" end,
+    }
+    local prompt = contract.user_prompt({ source = source, threads = {
+      { id = "c1", file = "a.lua", line_start = 4, side = "RIGHT", author = "alice", body = "root",
+        replies = { { author = "bob", body = "follow up" } } },
+    } })
+    assert.is_truthy(prompt:find("follow up", 1, true))
+    assert.is_truthy(prompt:find("git diff --no-ext-diff --no-textconv base123...head123 --", 1, true))
+    assert.is_nil(prompt:find("```diff", 1, true))
+  end)
+end)
+
 describe("parse_stream_line", function()
   it("extracts the session id from a system event", function()
     local ev = contract.parse_stream_line('{"type":"system","session_id":"abc"}')

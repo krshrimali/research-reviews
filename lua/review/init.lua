@@ -50,9 +50,23 @@ function M._attach_diff_buffer(bufnr)
       markers.toggle_at_cursor(ctx.bufnr, store, ctx.file, ctx.side, ctx.line)
     end
   end, { buffer = bufnr, nowait = true, desc = "review: expand/collapse thread" })
+  pcall(vim.keymap.set, "n", "]t", function() M.navigate_thread(1, false) end,
+    { buffer = bufnr, desc = "review: next thread" })
+  pcall(vim.keymap.set, "n", "[t", function() M.navigate_thread(-1, false) end,
+    { buffer = bufnr, desc = "review: previous thread" })
+  pcall(vim.keymap.set, "n", "]u", function() M.navigate_thread(1, true) end,
+    { buffer = bufnr, desc = "review: next unresolved thread" })
+  pcall(vim.keymap.set, "n", "[u", function() M.navigate_thread(-1, true) end,
+    { buffer = bufnr, desc = "review: previous unresolved thread" })
+  pcall(vim.keymap.set, "n", "v", M.toggle_viewed,
+    { buffer = bufnr, desc = "review: toggle file viewed" })
+  pcall(vim.keymap.set, "n", "o", function() M.open_at_commit(false) end,
+    { buffer = bufnr, desc = "review: open file at reviewed commit" })
+  pcall(vim.keymap.set, "n", "O", function() M.open_at_commit(true) end,
+    { buffer = bufnr, desc = "review: open file at reviewed commit in new tab" })
 
   -- Render existing markers for this specific diff buffer.
-  markers.render(attach_ctx.bufnr, store, attach_ctx.file, attach_ctx.side, vim.fn.bufwinid(bufnr))
+  diff.refresh_markers(store)
 end
 
 --- The current diff context (file/side/bufnr), or nil + notify.
@@ -137,27 +151,55 @@ function M.delete_at_cursor()
 end
 
 --- Open the current diff file at the source head in a worktree tab.
-function M.open_at_commit()
+function M.open_at_commit(new_tab)
   local ctx = ctx_or_warn()
   if not ctx then
     return
   end
   local meta = M.current.source:metadata()
-  require("review.worktree").open(meta.repo_root, M.current.source:head_rev(), ctx.file)
+  require("review.worktree").open(meta.repo_root, M.current.source:head_rev(), ctx.file, { tab = new_tab ~= false })
+end
+
+function M.toggle_viewed()
+  local ctx = ctx_or_warn()
+  if not ctx then return end
+  local now = M.current.store:set_viewed(ctx.file, not M.current.store:is_viewed(ctx.file))
+  local viewed, total = M.current.store:viewed_progress()
+  util.notify(string.format("%s · %d/%d files reviewed", now and "marked viewed" or "marked unread", viewed, total))
+end
+
+function M.navigate_thread(delta, unresolved_only)
+  local roots = M.current and M.current.store:all_threads() or {}
+  roots = vim.tbl_filter(function(root) return not unresolved_only or root.status ~= "resolved" end, roots)
+  table.sort(roots, function(a, b)
+    if a.file ~= b.file then return (a.file or "") < (b.file or "") end
+    return (a.line_start or 0) < (b.line_start or 0)
+  end)
+  if #roots == 0 then util.notify("no matching threads", vim.log.levels.INFO); return end
+  local ctx = require("review.ui.diff").context()
+  local idx = delta > 0 and 0 or 1
+  for i, root in ipairs(roots) do
+    if ctx and root.file == ctx.file and (root.line_start or 0) >= (ctx.line or 0) then idx = i; break end
+  end
+  idx = ((idx - 1 + delta) % #roots) + 1
+  local root = roots[idx]
+  require("diffview").open_review_location({ path = root.file, side = root.side, line = root.line_start })
 end
 
 --- Toggle the comments side-panel for the current file.
-function M.toggle_comments_panel()
+function M.toggle_comments_panel(force_open)
   local diff = require("review.ui.diff")
   local panel = require("review.ui.comments_panel")
   local ctx = diff.context()
-  local file = ctx and ctx.file or nil
   local side = ctx and ctx.side or "RIGHT"
-  panel.toggle(M.current.store, file, side, function(root)
-    -- Jump into the diff window and expand the thread.
+  local function jump(root)
+    local ok, dv = pcall(require, "diffview")
+    if ok and dv.open_review_location then
+      dv.open_review_location({ path = root.file, side = root.side, line = root.line_start })
+    end
     diff.refresh_markers(M.current.store)
-    util.notify(string.format("thread at %s:%d", root.file, root.line_start or 0))
-  end)
+  end
+  if force_open then panel.open(M.current.store, nil, side, jump) else panel.toggle(M.current.store, nil, side, jump) end
 end
 
 --- Add a comment (or suggestion) on the current line/selection.
@@ -236,6 +278,8 @@ function M.menu()
       }
       items[#items + 1] = { key = "d", label = "Delete thread", fn = M.delete_at_cursor }
       items[#items + 1] = { key = "y", label = "Copy thread", fn = M.copy_thread_at_cursor }
+      items[#items + 1] = { key = "A", label = "Ask Claude about this thread", fn = M.ask_claude_at_cursor }
+      items[#items + 1] = { key = "z", label = "React to thread", fn = function() M.react_to_thread(thread) end }
     end
     items[#items + 1] = { key = "o", label = "Open file @ commit (worktree)", fn = M.open_at_commit }
   elseif ft == "review-overview" then
@@ -274,6 +318,7 @@ function M.open(arg, opts)
   local store = Store.for_source(source)
   store:reanchor(rename_map(source))
 
+  if config.get().workspace.dedicated_tab then vim.cmd("tabnew") end
   M.current = { source = source, store = store }
 
   -- Import GitHub threads for PRs (best-effort).
@@ -286,6 +331,12 @@ function M.open(arg, opts)
   -- The diff is the ONE default surface (diffview + inline comments). The overview
   -- tab and comments panel are opt-in via the menu (<leader>p → O / P).
   require("review.ui.diff").open(source)
+
+  if config.get().workspace.comments and vim.o.columns >= config.get().workspace.comments_min_columns then
+    vim.schedule(function()
+      if M.current then M.toggle_comments_panel(true) end
+    end)
+  end
 
   util.notify(string.format("%s · %d comments · <leader>p for actions",
     source:title(), vim.tbl_count(store.comments)))
@@ -301,27 +352,40 @@ end
 function M.refresh()
   if not M.current then return end
   local old = M.current.source
-  local arg = old:kind() == "pr" and old.number or old:head_rev()
+  local before_threads, before_head = #M.current.store:all_threads(), old:head_rev()
+  local ctx = require("review.ui.diff").context()
+  local arg = old:kind() == "pr" and old.number or old.branch
   local Source = require("review.source")
-  local fresh, err = Source.create(arg, old:metadata().repo_root, {})
+  util.notify("refreshing metadata, commits, checks, and threads…")
+  local fresh, err = Source.create(arg, old:metadata().repo_root, { base = old.base_ref })
   if not fresh then
     util.notify("refresh failed: " .. tostring(err), vim.log.levels.ERROR)
     return
   end
   M.current.source, M.current.store.source = fresh, fresh
   if fresh:caps().has_threads then require("review.comments.github_sync").import(fresh, M.current.store) end
+  M.current.store:reanchor(rename_map(fresh))
   require("review.ui.diff").refresh_markers(M.current.store)
-  util.notify("review refreshed from remote")
+  if ctx then require("diffview").open_review_location({ path = ctx.file, side = ctx.side, line = ctx.line }) end
+  local new_threads = #M.current.store:all_threads() - before_threads
+  util.notify(string.format("refreshed · head %s · %s%d new thread%s", before_head == fresh:head_rev()
+    and "unchanged" or ("advanced to " .. fresh:head_rev():sub(1, 8)), new_threads >= 0 and "+" or "",
+    new_threads, math.abs(new_threads) == 1 and "" or "s"))
 end
 
-local function open_final_prompt(instruction, allow_edits)
+local function open_final_prompt(instruction, allow_edits, threads)
   local sidekick = require("review.sidekick")
   local prompt = sidekick.prompt(M.current.source, M.current.store, {
     instruction = instruction, allow_edits = allow_edits,
-    auto_resolve = config.get().claude.auto_resolve,
+    auto_resolve = config.get().claude.auto_resolve, threads = threads,
   })
   require("review.ui.prompt").open(prompt, { on_run = function(final)
-    local session, err = sidekick.run(M.current.source, M.current.store, final, { allow_edits = allow_edits })
+    local session, err = sidekick.run(M.current.source, M.current.store, final, {
+      allow_edits = allow_edits,
+      auto_resolve = config.get().claude.auto_resolve,
+      on_progress = function() require("review.ui.diff").refresh_markers(M.current.store) end,
+      on_done = function() require("review.ui.diff").refresh_markers(M.current.store) end,
+    })
     if not session then
       util.notify("review session failed: " .. tostring(err), vim.log.levels.ERROR)
     else
@@ -329,6 +393,63 @@ local function open_final_prompt(instruction, allow_edits)
       util.notify("review agent started · open Chat to follow progress")
     end
   end })
+end
+
+function M.ask_claude_at_cursor()
+  local ctx = ctx_or_warn()
+  if not ctx then return end
+  local root = require("review.ui.markers").thread_at_cursor(
+    M.current.store, ctx.file, ctx.side, ctx.line)
+  if not root then
+    util.notify("no thread on this line", vim.log.levels.INFO)
+    return
+  end
+  open_final_prompt("Assess this review thread and address it directly.", false, { root })
+end
+
+function M.ask_claude_threads(threads)
+  if not M.current or not threads or #threads == 0 then return end
+  open_final_prompt(string.format("Assess and address these %d selected review threads.", #threads), false, threads)
+end
+
+function M.publish_threads(threads)
+  if not M.current or M.current.source:kind() ~= "pr" then
+    util.notify("publishing requires a GitHub PR", vim.log.levels.WARN); return
+  end
+  local drafts = vim.tbl_filter(function(root)
+    return root.status == "draft" and not root.github_id and not root.in_reply_to
+  end, threads or M.current.store:all_threads())
+  if #drafts == 0 then util.notify("no publishable drafts", vim.log.levels.INFO); return end
+  local comments = {}
+  for _, root in ipairs(drafts) do
+    comments[#comments + 1] = { path = root.file, line = root.line_end or root.line_start,
+      side = root.side or "RIGHT", body = root.body }
+  end
+  local src, meta = M.current.source, M.current.source:metadata()
+  local result, err = require("review.util.gh").submit_review(meta.owner, meta.repo, meta.number, {
+    commit_id = src:head_rev(), event = "COMMENT", body = "Review submitted from review.nvim", comments = comments,
+  }, meta.repo_root)
+  if not result then util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR); return end
+  for _, root in ipairs(drafts) do M.current.store:update(root.id, { status = "published" }) end
+  M.refresh()
+  util.notify(string.format("published %d review comments", #drafts))
+end
+
+function M.react_to_thread(root)
+  if not root then return end
+  local choices = { "THUMBS_UP", "THUMBS_DOWN", "LAUGH", "HOORAY", "CONFUSED", "HEART", "ROCKET", "EYES" }
+  vim.ui.select(choices, { prompt = "React to thread:" }, function(reaction)
+    if not reaction then return end
+    if root.github_id then
+      local ok, err = require("review.util.gh").react(root.github_id, reaction, true,
+        M.current.source:metadata().repo_root)
+      if not ok then util.notify("reaction failed: " .. tostring(err), vim.log.levels.ERROR); return end
+    end
+    root.reactions = root.reactions or {}
+    root.reactions[reaction] = (root.reactions[reaction] or 0) + 1
+    M.current.store:update(root.id, { reactions = root.reactions })
+    require("review.ui.diff").refresh_markers(M.current.store)
+  end)
 end
 
 --- Kick off a Claude review of the current source.
@@ -408,6 +529,15 @@ function M.setup(opts)
     callback = function(ev)
       if M.current then
         M._attach_diff_buffer(ev.buf)
+      end
+    end,
+  })
+
+  vim.api.nvim_create_autocmd("VimResized", {
+    group = group,
+    callback = function()
+      if M.current and vim.o.columns < config.get().workspace.comments_min_columns then
+        require("review.ui.comments_panel").close()
       end
     end,
   })

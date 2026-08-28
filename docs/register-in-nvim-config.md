@@ -13,9 +13,19 @@ Idempotent and re-runnable. If you applied an earlier version, it starts from th
 pristine `*.bak` it saved, so the old multi-keymap block is dropped cleanly. Restart
 Neovim afterwards.
 
-## The model: one key
+## The model: one menu plus optional fast paths
 
-`<leader>p` is the only key to learn (leader = `,`, so `,p`).
+`<leader>p` is the only required key (leader = `,`, so `,p`). The installed config also
+provides direct mappings without duplicating any existing mapping:
+
+- `,pc` Claude review
+- `,ph` Claude chat
+- `,pr` refresh
+- `,pe` edit/copy/run prompt
+- `,pt` thread inbox
+- `,ps` agent sessions
+- `,pl` pick PR/branch
+- `,px` clean safe worktrees
 
 - **Outside a review:** `<leader>p` → "Start a review (pick PR / branch)".
 - **Inside a review:** `<leader>p` opens a **contextual menu** of just the actions valid
@@ -31,7 +41,10 @@ Neovim afterwards.
 │  y  Copy thread                       │
 │  o  Open file @ commit (worktree)     │
 │ ── review ──                          │
-│  C  Claude review (async)…            │
+│  C  Claude review (Sidekick)…         │
+│  a  Agent chat                        │
+│  Y  Edit/copy/run final prompt        │
+│  f  Refresh PR and comments           │
 │  R  Claude review sessions            │
 │  O  Overview (desc, commits, threads) │
 │  P  Toggle comments panel             │

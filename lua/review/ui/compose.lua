@@ -9,7 +9,7 @@ local M = {}
 
 --- Open a composer.
 ---@param opts table {
----   title=string, seed=string[]|nil, suggestion=boolean|nil,
+---   title=string, seed=string[]|nil, initial=string|nil, suggestion=boolean|nil,
 ---   on_submit=fun(body:string, is_suggestion:boolean, suggestion_text:string|nil),
 --- }
 function M.open(opts)
@@ -33,7 +33,11 @@ function M.open(opts)
   if opts.suggestion then
     vim.list_extend(header, { "```suggestion", "", "```" })
   else
-    table.insert(header, "")
+    if opts.initial then
+      vim.list_extend(header, vim.split(opts.initial, "\n", { plain = true }))
+    else
+      table.insert(header, "")
+    end
   end
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, header)
 

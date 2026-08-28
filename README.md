@@ -30,6 +30,13 @@ resolution, manual refresh, an editable/copyable agent prompt, and conversationa
 sessions through Sidekick. Edit-enabled sessions require explicit consent and use only a
 private worktree under the reviewed repository's own `.git/prtui/worktrees` directory.
 
+The default workspace keeps Diffview's file tree and diff visible alongside a responsive
+thread inbox. The inbox supports `/` search, `f` status filters, `Space` multi-select,
+`a` scoped Claude review, and `p` draft publishing. In a diff, `[t`/`]t` navigate all
+threads, `[u`/`]u` navigate unresolved threads, `v` marks the file viewed, and `o`/`O`
+open the reviewed file in the current/new tab. Claude progress appears in the winbar and
+structured replies/findings are imported back into inline UI threads when the run completes.
+
 ## Config
 
 Optional `~/.config/prtui/config.json`:

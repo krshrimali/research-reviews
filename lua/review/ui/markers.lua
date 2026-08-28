@@ -24,8 +24,23 @@ local function thread_virt_lines(store, root)
   end
   local status = root.status ~= "draft" and (" [" .. root.status .. "]") or ""
   add(string.format("  ╭─ %s (%s)%s", root.author or "?", root.origin or "local", status), "Title")
+  if root.reactions then
+    local chips = {}
+    for name, count in pairs(root.reactions) do chips[#chips + 1] = string.format("%s %d", name:lower(), count) end
+    table.sort(chips)
+    if #chips > 0 then add("  │ " .. table.concat(chips, " · "), "Special") end
+  end
+  local fenced = false
   for _, bodyline in ipairs(vim.split(root.body or "", "\n", { plain = true })) do
-    add("  │ " .. bodyline)
+    if bodyline:match("^%s*```") then
+      fenced = not fenced
+      add("  │ " .. bodyline, "Comment")
+    elseif fenced then
+      local hl = bodyline:match("^%s*[/%-%-#]+") and "Comment" or "String"
+      add("  │ " .. bodyline, hl)
+    else
+      add("  │ " .. bodyline)
+    end
   end
   if root.kind == "suggestion" and root.suggestion_text then
     add("  │ suggestion:", "DiagnosticInfo")

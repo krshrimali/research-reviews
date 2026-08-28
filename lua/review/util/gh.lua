@@ -175,4 +175,20 @@ function M.resolve_thread(thread_id, resolved, cwd)
   return data ~= nil, err
 end
 
+function M.submit_review(owner, repo, number, payload, cwd)
+  local path = string.format("repos/%s/%s/pulls/%d/reviews", owner, repo, number)
+  local ok, out, err = proc.run({ vim.env.PRTUI_GH_BIN or "gh", "api", path,
+    "--method", "POST", "--input", "-" }, { cwd = cwd, stdin = vim.json.encode(payload) })
+  if not ok then return nil, err end
+  local decoded, value = pcall(vim.json.decode, out)
+  return decoded and value or nil, decoded and nil or "bad GitHub response"
+end
+
+function M.react(subject_id, content, add, cwd)
+  local field = add == false and "removeReaction" or "addReaction"
+  local q = string.format("mutation($id:ID!,$content:ReactionContent!){%s(input:{subjectId:$id,content:$content}){reaction{content}}}", field)
+  local data, err = M.graphql(q, { id = subject_id, content = content }, cwd)
+  return data ~= nil, err
+end
+
 return M

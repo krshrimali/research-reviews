@@ -105,7 +105,8 @@ end
 ---@param sha string
 ---@param file string
 ---@return boolean ok, string|nil err
-function M.open(repo_root, sha, file)
+function M.open(repo_root, sha, file, opts)
+  opts = opts or {}
   local path, err = M.ensure(repo_root, sha)
   if not path then
     util.notify("worktree: " .. tostring(err), vim.log.levels.ERROR)
@@ -116,7 +117,7 @@ function M.open(repo_root, sha, file)
     util.notify(string.format("file %s not present at %s", file, sha:sub(1, 8)), vim.log.levels.WARN)
     -- Still open the tab at the worktree root so the user can browse.
   end
-  vim.cmd("tabnew")
+  if opts.tab ~= false then vim.cmd("tabnew") end
   -- Tab-local cwd so LSP root detection / gf operate in the snapshot (R4).
   vim.cmd("tcd " .. vim.fn.fnameescape(path))
   if vim.fn.filereadable(target) == 1 then

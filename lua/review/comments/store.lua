@@ -29,6 +29,7 @@ function Store.for_source(source)
     comments = doc.comments or {},
     sessions = doc.sessions or {},
     tombstones = doc.tombstones or {},
+    viewed = (doc.meta and doc.meta.viewed) or {},
   }, Store)
   -- Defensively drop any tombstoned records that lingered on disk.
   for id in pairs(self.tombstones) do
@@ -45,12 +46,28 @@ function Store:save()
     comments = self.comments,
     sessions = self.sessions,
     tombstones = self.tombstones,
-    meta = {},
+    meta = { viewed = self.viewed },
   })
   if not ok then
     util.notify("failed to persist comments: " .. tostring(err), vim.log.levels.ERROR)
   end
   return ok
+end
+
+function Store:is_viewed(file)
+  return self.viewed[file] == self.source:head_rev()
+end
+
+function Store:set_viewed(file, value)
+  self.viewed[file] = value == false and nil or self.source:head_rev()
+  self:save()
+  return self:is_viewed(file)
+end
+
+function Store:viewed_progress()
+  local files, viewed = self.source:files(), 0
+  for _, file in ipairs(files) do if self:is_viewed(file.path) then viewed = viewed + 1 end end
+  return viewed, #files
 end
 
 --- Add a new root comment.

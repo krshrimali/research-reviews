@@ -100,6 +100,9 @@ local function apply_findings(store, source, session, findings)
   store:save()
 end
 
+---Public result bridge for Sidekick-backed interactive sessions.
+M.apply_findings = apply_findings
+
 --- Start a review. Returns the session record immediately; runs async.
 ---@param opts table {
 ---   store table, source table, instruction string,

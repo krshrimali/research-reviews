@@ -20,6 +20,13 @@ M.defaults = {
   -- Number of context lines kept visible around a hunk when folded.
   fold_context = 3,
 
+  workspace = {
+    dedicated_tab = true,
+    comments = true,
+    comments_width = 42,
+    comments_min_columns = 120,
+  },
+
   -- Minimal keymap surface: ONE key opens a contextual action menu; the menu
   -- teaches everything else (recognition over recall). `primary` is the fast-path
   -- action on the current line. The two overview-local keys stay because they're

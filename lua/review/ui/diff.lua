@@ -91,6 +91,15 @@ function M.refresh_markers(store)
     local ctx = M.buffer_context(bufnr)
     if ctx and ctx.file then
       markers.render(ctx.bufnr, store, ctx.file, ctx.side, win)
+      local viewed, total = store:viewed_progress()
+      local open = 0
+      for _, root in ipairs(store:all_threads()) do if root.status ~= "resolved" then open = open + 1 end end
+      local agent = ""
+      for _, session in pairs(store.sessions or {}) do
+        if session.state == "running" then agent = " │ Claude: " .. (session.progress or "working"); break end
+      end
+      vim.wo[win].winbar = string.format(" %%#Title#%s%%* %%= %d/%d viewed · %d open%s ",
+        ctx.file, viewed, total, open, agent)
     end
   end
 end
