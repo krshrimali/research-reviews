@@ -198,7 +198,17 @@ end
 --- Present items via the configured picker; call on_choose(item).
 ---@param items table[]
 ---@param on_choose fun(item:table)
-local function present(items, cwd, on_choose)
+local function next_state(state)
+  local states = { "open", "closed", "merged", "all" }
+  for i, value in ipairs(states) do
+    if value == state then return states[(i % #states) + 1] end
+  end
+  return states[1]
+end
+
+M._next_state = next_state
+
+local function present(items, cwd, on_choose, opts)
   local pref = config.get().picker
   local function try_snacks()
     local ok, snacks = util.has("snacks")
@@ -206,7 +216,7 @@ local function present(items, cwd, on_choose)
       return false
     end
     snacks.picker.pick({
-      title = "review: pick PR / branch",
+      title = "review: pick PR / branch · " .. (opts.state or "open") .. " (Tab: cycle state)",
       items = vim.tbl_map(function(it)
         return { text = it.label, item = it }
       end, items),
@@ -219,10 +229,21 @@ local function present(items, cwd, on_choose)
           picker:close()
           M.to_quickfix(sources, cwd, on_choose)
         end,
+        review_cycle_state = function(picker)
+          picker:close()
+          local next_opts = vim.tbl_extend("force", opts, { state = next_state(opts.state) })
+          M.open(cwd, next_opts, on_choose)
+        end,
       },
       win = {
-        input = { keys = { ["<C-q>"] = { "review_qflist", mode = { "i", "n" } } } },
-        list = { keys = { ["<C-q>"] = "review_qflist" } },
+        input = { keys = {
+          ["<C-q>"] = { "review_qflist", mode = { "i", "n" } },
+          ["<Tab>"] = { "review_cycle_state", mode = { "i", "n" } },
+        } },
+        list = { keys = {
+          ["<C-q>"] = "review_qflist",
+          ["<Tab>"] = "review_cycle_state",
+        } },
       },
       confirm = function(picker, choice)
         picker:close()
@@ -245,7 +266,7 @@ local function present(items, cwd, on_choose)
       by_label[it.label] = it
     end
     fzf.fzf_exec(labels, {
-      prompt = "review> ",
+      prompt = "review (" .. (opts.state or "open") .. ")> ",
       fzf_opts = { ["--multi"] = true },
       actions = {
         ["default"] = function(selected)
@@ -299,16 +320,18 @@ end
 ---@param on_choose fun(item:table)
 function M.open(cwd, opts, on_choose)
   cwd = cwd or vim.fn.getcwd()
-  if not opts or opts.quickfix ~= false then
+  opts = opts or {}
+  if opts.quickfix then
     M.open_quickfix(cwd, on_choose)
     return
   end
-  local items = M.gather_items(cwd, opts or {})
+  opts.state = opts.state or "open"
+  local items = M.gather_items(cwd, opts)
   if #items == 0 then
     util.notify("no PRs or branches found", vim.log.levels.WARN)
     return
   end
-  present(items, cwd, on_choose)
+  present(items, cwd, on_choose, opts)
 end
 
 return M

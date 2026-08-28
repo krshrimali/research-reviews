@@ -1,6 +1,13 @@
 local list = require("review.ui.list")
 
 describe("review source quickfix", function()
+  it("cycles picker PR states in order", function()
+    assert.equals("closed", list._next_state("open"))
+    assert.equals("merged", list._next_state("closed"))
+    assert.equals("all", list._next_state("merged"))
+    assert.equals("open", list._next_state("all"))
+  end)
+
   it("provides actionable state, source, search, and refresh filters", function()
     local rows = list._filter_rows({ state = "open", source = "both", search = "author:me" })
     local labels = vim.tbl_map(function(row) return row.label end, rows)
