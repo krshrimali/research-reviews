@@ -53,6 +53,7 @@ pub struct Picker {
     pr_rx: Option<Receiver<Vec<Item>>>,
     loading: bool,
     error: Option<String>,
+    show_all_prs: bool,
 }
 
 // ---- fuzzy matching -------------------------------------------------------
@@ -172,6 +173,10 @@ fn item_score(it: &Item, q: &Query) -> Option<i32> {
 
 impl Picker {
     pub fn new(cwd: &str) -> Picker {
+        Self::with_pr_scope(cwd, false)
+    }
+
+    fn with_pr_scope(cwd: &str, show_all_prs: bool) -> Picker {
         let mut items = vec![];
         let cur = git::current_branch(Some(cwd));
         if let (true, out, _) = proc::git(
@@ -197,7 +202,13 @@ impl Picker {
         if loading {
             let cwd2 = cwd.to_string();
             std::thread::spawn(move || {
-                let _ = tx.send(gh::list_prs(Some(&cwd2)).iter().map(pr_to_item).collect());
+                let state = if show_all_prs { "all" } else { "open" };
+                let _ = tx.send(
+                    gh::list_prs_with_state(Some(&cwd2), state)
+                        .iter()
+                        .map(pr_to_item)
+                        .collect(),
+                );
             });
         }
         let mut p = Picker {
@@ -210,6 +221,7 @@ impl Picker {
             pr_rx: if loading { Some(rx) } else { None },
             loading,
             error: None,
+            show_all_prs,
         };
         p.refilter();
         p
@@ -305,7 +317,11 @@ impl Picker {
             KeyCode::Char('G') => self.move_sel(i32::MAX / 2),
             KeyCode::Char('r') => {
                 let cwd = self.cwd.clone();
-                *self = Picker::new(&cwd);
+                *self = Picker::with_pr_scope(&cwd, self.show_all_prs);
+            }
+            KeyCode::Char('s') => {
+                let cwd = self.cwd.clone();
+                *self = Picker::with_pr_scope(&cwd, !self.show_all_prs);
             }
             KeyCode::Char('t') => {
                 crate::theme::cycle();
@@ -388,10 +404,15 @@ impl Picker {
             .map(|&i| self.row(&self.items[i], &q.text))
             .collect();
         let count = self.filtered.len();
-        let title = if self.loading {
-            format!(" {count} shown · loading PRs… ")
+        let scope = if self.show_all_prs {
+            "all PRs"
         } else {
-            format!(" {count} shown ")
+            "open PRs"
+        };
+        let title = if self.loading {
+            format!(" {count} shown · {scope} · loading… ")
+        } else {
+            format!(" {count} shown · {scope} ")
         };
         let list = List::new(rows)
             .block(
@@ -430,7 +451,7 @@ impl Picker {
             )
         } else {
             Span::styled(
-                "  j/k move · enter open · / search · r refresh · t theme · q quit",
+                "  j/k move · enter open · / search · s open/all PRs · r refresh · t theme · q quit",
                 Style::default().fg(t::muted()),
             )
         };

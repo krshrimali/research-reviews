@@ -149,6 +149,12 @@ pub fn owner_repo(cwd: Option<&str>) -> Option<(String, String)> {
 
 /// Lightweight PR records for the picker.
 pub fn list_prs(cwd: Option<&str>) -> Vec<Value> {
+    list_prs_with_state(cwd, "open")
+}
+
+/// Lightweight PR records for the picker, including closed/merged PRs when
+/// `state` is `all`.
+pub fn list_prs_with_state(cwd: Option<&str>, state: &str) -> Vec<Value> {
     let gh = gh_bin();
     let (ok, out, _) = proc::run(
         &[
@@ -160,6 +166,8 @@ pub fn list_prs(cwd: Option<&str>) -> Vec<Value> {
 headRefName,baseRefName,assignees",
             "--limit",
             "200",
+            "--state",
+            state,
         ],
         cwd,
     );

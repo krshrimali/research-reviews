@@ -73,6 +73,14 @@ fn list_prs_parses_records() {
         log(&logp).contains("pr list"),
         "argv logged the pr list command"
     );
+    assert!(log(&logp).contains("--state open"));
+}
+
+#[test]
+fn list_prs_can_include_closed_and_merged() {
+    let Some((_g, logp)) = setup() else { return };
+    let _ = gh::list_prs_with_state(None, "all");
+    assert!(log(&logp).contains("--state all"));
 }
 
 #[test]
