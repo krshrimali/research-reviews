@@ -75,7 +75,7 @@ function M.list_prs(opts, cwd)
   opts = opts or {}
   local argv = {
     vim.env.PRTUI_GH_BIN or "gh", "pr", "list",
-    "--json", "number,title,body,author,state,isDraft,updatedAt,headRefName,baseRefName,labels,assignees,reviewDecision",
+    "--json", "number,title,author,state,isDraft,updatedAt,headRefName,baseRefName,labels,reviewDecision",
     "--limit", tostring(opts.limit or 100),
   }
   if opts.state then

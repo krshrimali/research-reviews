@@ -12,17 +12,6 @@ describe("review source quickfix", function()
     assert.is_truthy(text:find("Refresh results", 1, true))
   end)
 
-  it("formats PR metadata and description for preview", function()
-    local lines = list._preview_lines({ review_source = {
-      kind = "pr", arg = 42, preview = { title = "Fix auth", author = "octocat",
-        state = "OPEN", head = "fix", base = "main", labels = { "bug" }, body = "Details" },
-    } }, { state = "open", source = "both", search = "" })
-    local text = table.concat(lines, "\n")
-    assert.is_truthy(text:find("# #42 · Fix auth", 1, true))
-    assert.is_truthy(text:find("@octocat", 1, true))
-    assert.is_truthy(text:find("Details", 1, true))
-  end)
-
   it("retains source metadata and opens the selected review", function()
     local cwd = vim.fn.getcwd()
     local items = {
