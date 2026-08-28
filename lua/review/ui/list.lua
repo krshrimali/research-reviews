@@ -178,6 +178,7 @@ M._preview_lines = preview_lines
 ---same list; result rows open reviews.
 function M.open_quickfix(cwd, on_choose)
   local filters = { state = "open", source = "both", search = "" }
+  local origin_win = vim.api.nvim_get_current_win()
   local preview_buf, preview_win
   local function update_preview()
     if not preview_buf or not vim.api.nvim_buf_is_valid(preview_buf) then return end
@@ -220,16 +221,29 @@ function M.open_quickfix(cwd, on_choose)
       preview_buf = vim.api.nvim_create_buf(false, true)
       vim.bo[preview_buf].buftype, vim.bo[preview_buf].bufhidden = "nofile", "wipe"
       vim.bo[preview_buf].filetype = "markdown"
+      local anchor = vim.api.nvim_win_is_valid(origin_win) and origin_win or qfwin
+      local available = vim.api.nvim_win_get_width(anchor)
+      local preview_width = math.max(1, math.min(math.max(38, math.floor(available * 0.46)), available - 1))
       preview_win = vim.api.nvim_open_win(preview_buf, false, {
-        split = "above", win = qfwin, height = math.max(8, math.floor(vim.o.lines * 0.32)),
+        split = "right", win = anchor, width = preview_width,
       })
       vim.wo[preview_win].wrap, vim.wo[preview_win].linebreak = true, true
-      vim.wo[preview_win].winfixheight = true
+      vim.wo[preview_win].winfixwidth = true
       pcall(vim.treesitter.start, preview_buf, "markdown")
       vim.api.nvim_create_autocmd("CursorMoved", {
         buffer = buf,
         callback = update_preview,
         desc = "Update review source preview",
+      })
+      vim.api.nvim_create_autocmd("WinClosed", {
+        pattern = tostring(qfwin),
+        once = true,
+        callback = function()
+          if preview_win and vim.api.nvim_win_is_valid(preview_win) then
+            vim.api.nvim_win_close(preview_win, true)
+          end
+        end,
+        desc = "Close review preview with quickfix",
       })
     end
     update_preview()
