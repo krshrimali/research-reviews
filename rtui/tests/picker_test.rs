@@ -122,6 +122,16 @@ fn q_quits() {
 }
 
 #[test]
+fn toggles_open_and_all_pr_scope() {
+    let mut p = Picker::new(&fixture());
+    assert!(!p.showing_all_prs());
+    p.on_key(code(KeyCode::Tab));
+    assert!(p.showing_all_prs());
+    p.on_key(key('s'));
+    assert!(!p.showing_all_prs());
+}
+
+#[test]
 fn search_mode_captures_text_not_commands() {
     let mut p = Picker::new(&fixture());
     p.on_key(key('/'));

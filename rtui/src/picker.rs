@@ -319,7 +319,7 @@ impl Picker {
                 let cwd = self.cwd.clone();
                 *self = Picker::with_pr_scope(&cwd, self.show_all_prs);
             }
-            KeyCode::Char('s') => {
+            KeyCode::Char('s') | KeyCode::Tab => {
                 let cwd = self.cwd.clone();
                 *self = Picker::with_pr_scope(&cwd, !self.show_all_prs);
             }
@@ -451,7 +451,7 @@ impl Picker {
             )
         } else {
             Span::styled(
-                "  j/k move · enter open · / search · s open/all PRs · r refresh · t theme · q quit",
+                "  j/k move · enter open · / search · tab open/all PRs · r refresh · t theme · q quit",
                 Style::default().fg(t::muted()),
             )
         };
@@ -469,6 +469,11 @@ impl Picker {
             Paragraph::new(vec![quals, bar]).style(Style::default().bg(t::bg())),
             root[2],
         );
+    }
+
+    /// Exposed for UI/integration tests and status consumers.
+    pub fn showing_all_prs(&self) -> bool {
+        self.show_all_prs
     }
 
     /// Build one list row: kind badge + highlighted title + metadata.
