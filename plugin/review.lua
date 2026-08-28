@@ -42,6 +42,8 @@ vim.api.nvim_create_user_command("ReviewPrompt", function() review().copy_prompt
   { desc = "Edit, copy, or run the review prompt" })
 vim.api.nvim_create_user_command("ReviewImport", function() review().import_github_comments() end,
   { desc = "Import or refresh GitHub review comments" })
+vim.api.nvim_create_user_command("ReviewSync", function() review().sync_claude_result() end,
+  { desc = "Import the latest Claude findings from its transcript" })
 vim.api.nvim_create_user_command("ReviewQuickfix", function() review().threads_to_quickfix() end,
   { desc = "Export review threads to quickfix" })
 

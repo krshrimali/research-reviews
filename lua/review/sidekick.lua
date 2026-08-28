@@ -6,6 +6,40 @@ local worktree = require("review.worktree")
 local M = {}
 M.pollers = {}
 
+---Read the agent's exact persisted transcript instead of terminal cells. Terminal
+---buffers contain display-width reflow and can therefore split/corrupt long JSON.
+---@param source table
+---@param cwd string
+---@param model table|nil injectable transcript model for tests
+---@return string|nil
+function M.transcript_result(source, cwd, model)
+  local ok
+  if not model then
+    ok, model = pcall(require, "sidekick.review.model")
+    if not ok then return nil end
+  end
+  local ok_sessions, sources = pcall(model.sessions, cwd)
+  if not ok_sessions or type(sources) ~= "table" then return nil end
+  local head = source:head_rev()
+  for _, transcript_source in ipairs(sources) do
+    local ok_build, transcript = pcall(model.build, transcript_source)
+    if ok_build and transcript then
+      for i = #(transcript.turns or {}), 1, -1 do
+        local turn = transcript.turns[i]
+        if type(turn.prompt) == "string" and turn.prompt:find(head, 1, true) then
+          local text = {}
+          for _, block in ipairs(turn.blocks or {}) do
+            if block.kind == "text" and type(block.text) == "string" then
+              text[#text + 1] = block.text
+            end
+          end
+          if #text > 0 then return table.concat(text, "\n") end
+        end
+      end
+    end
+  end
+end
+
 local function roots_with_replies(store, roots)
   local out = vim.deepcopy(roots or store:all_threads())
   for _, root in ipairs(out) do
@@ -75,23 +109,27 @@ function M.run(source, store, prompt, opts)
     if session.state ~= "running" then return end
     local terminal = state.terminal
     local buf = terminal and terminal.buf
+    local lines, text = {}, ""
     if buf and vim.api.nvim_buf_is_valid(buf) then
-      local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
-      local text = table.concat(lines, "\n")
-      local findings = require("review.claude.contract").extract_findings(text)
-      if findings and findings.reviewed_head_sha then
-        require("review.claude.runner").apply_findings(store, source, session, findings)
-        session.state = "done"
-        session.progress = "Findings imported"
-        session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
-        store.sessions[id] = session
-        store:save()
-        M.pollers[id] = nil
-        if opts.on_done then opts.on_done(session) end
-        util.notify(string.format("Claude review imported · %d findings · %d replies",
-          #(session.findings or {}), #(session.replied or {})))
-        return
-      end
+      lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+      text = table.concat(lines, "\n")
+    end
+    local exact = M.transcript_result(source, cwd)
+    local findings = require("review.claude.contract").extract_findings(exact or text)
+    if findings and findings.reviewed_head_sha then
+      require("review.claude.runner").apply_findings(store, source, session, findings)
+      session.state = "done"
+      session.progress = "Findings imported"
+      session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      store.sessions[id] = session
+      store:save()
+      M.pollers[id] = nil
+      if opts.on_done then opts.on_done(session) end
+      util.notify(string.format("Claude review imported · %d findings · %d replies",
+        #(session.findings or {}), #(session.replied or {})))
+      return
+    end
+    if #lines > 0 then
       for i = #lines, math.max(1, #lines - 12), -1 do
         local line = vim.trim(lines[i] or "")
         if line ~= "" then
@@ -104,14 +142,18 @@ function M.run(source, store, prompt, opts)
         last_progress = session.progress
         if opts.on_progress then opts.on_progress(session) end
       end
-      if terminal and not terminal:is_running() then
-        session.state, session.progress = "error", "Agent exited without structured findings"
-        session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
-        store:save()
-        M.pollers[id] = nil
-        if opts.on_done then opts.on_done(session) end
-        return
-      end
+    end
+    if terminal and not terminal:is_running() then
+      local _, parse_err = require("review.claude.contract").extract_findings(exact or text)
+      session.state, session.progress = "error", "Review finished, but findings could not be imported"
+      session.error = parse_err or "no structured findings"
+      session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      store:save()
+      M.pollers[id] = nil
+      if opts.on_done then opts.on_done(session) end
+      util.notify("Claude review was readable, but inline findings were not imported: "
+        .. session.error .. " · open Review Sessions for the full response", vim.log.levels.ERROR)
+      return
     end
     if ticks % 3 == 0 then store.sessions[id] = session; store:save() end
     vim.defer_fn(tick, 1500)

@@ -35,6 +35,7 @@ thread inbox. The inbox supports `/` search, `f` status filters, `Space` multi-s
 `a` scoped Claude review, `I` GitHub import, `Q` quickfix export, and `p` draft publishing.
 In the PR/branch picker, select rows and press `<C-q>` to send them to quickfix;
 `<Enter>` on a quickfix row opens that PR or branch review.
+Use `:ReviewSync` to recover the latest Claude findings from its exact transcript.
 In a diff, `[t`/`]t` navigate all threads, `[u`/`]u` navigate unresolved threads,
 `<localleader>v` marks the file viewed without shadowing native visual mode, and `o`/`O`
 open the reviewed file in the current/new tab. Claude progress appears in the winbar and

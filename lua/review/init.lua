@@ -300,6 +300,7 @@ function M.menu()
   items[#items + 1] = { key = "Y", label = "Edit, copy, or run final prompt", fn = M.copy_prompt }
   items[#items + 1] = { key = "f", label = "Refresh PR and comments", fn = M.refresh }
   items[#items + 1] = { key = "i", label = "Import GitHub comments", fn = M.import_github_comments }
+  items[#items + 1] = { key = "S", label = "Sync latest Claude findings", fn = M.sync_claude_result }
   items[#items + 1] = { key = "q", label = "Export threads to quickfix", fn = M.threads_to_quickfix }
   items[#items + 1] = { key = "R", label = "Claude review sessions", fn = M.claude_sessions }
   items[#items + 1] = { key = "O", label = "Overview (description, commits, threads)", fn = M.show_overview }
@@ -392,6 +393,33 @@ function M.import_github_comments()
   util.notify(string.format("GitHub comments imported · %d new", imported))
 end
 
+---Recover/import the latest Claude result from its persisted Sidekick transcript.
+---Useful when an older live poller saw terminal-reflowed JSON and could not parse it.
+function M.sync_claude_result()
+  if not M.current then util.notify("open a review first", vim.log.levels.WARN); return end
+  local sessions = vim.tbl_values(M.current.store.sessions or {})
+  table.sort(sessions, function(a, b) return (a.started_at or "") > (b.started_at or "") end)
+  local session = sessions[1]
+  if not session then util.notify("no Claude review session to synchronize", vim.log.levels.INFO); return end
+  session.replied, session.findings = session.replied or {}, session.findings or {}
+  local text = require("review.sidekick").transcript_result(
+    M.current.source, session.cwd or M.current.source:metadata().repo_root)
+  local findings, err = require("review.claude.contract").extract_findings(text)
+  if not findings then
+    util.notify("could not synchronize Claude findings: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
+  require("review.claude.runner").apply_findings(M.current.store, M.current.source, session, findings)
+  session.state, session.progress = "done", "Findings imported from transcript"
+  session.error = nil
+  M.current.store.sessions[session.id] = session
+  M.current.store:save()
+  require("review.ui.diff").refresh_markers(M.current.store)
+  M.toggle_comments_panel(true)
+  util.notify(string.format("Claude review synchronized · %d findings · %d replies",
+    #(session.findings or {}), #(session.replied or {})))
+end
+
 function M.threads_to_quickfix(threads)
   if not M.current then return end
   threads = threads or M.current.store:all_threads()
@@ -430,7 +458,14 @@ local function open_final_prompt(instruction, allow_edits, threads)
       allow_edits = allow_edits,
       auto_resolve = config.get().claude.auto_resolve,
       on_progress = function() require("review.ui.diff").refresh_markers(M.current.store) end,
-      on_done = function() require("review.ui.diff").refresh_markers(M.current.store) end,
+      on_done = function(done)
+        require("review.ui.diff").refresh_markers(M.current.store)
+        if done.applied and (#(done.findings or {}) > 0 or #(done.replied or {}) > 0) then
+          M.toggle_comments_panel(true)
+        elseif require("review.ui.comments_panel").is_open() then
+          require("review.ui.comments_panel").render(M.current.store, nil, "RIGHT")
+        end
+      end,
     })
     if not session then
       util.notify("review session failed: " .. tostring(err), vim.log.levels.ERROR)

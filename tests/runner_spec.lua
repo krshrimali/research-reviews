@@ -77,4 +77,24 @@ describe("claude runner (fake claude)", function()
     assert.equals(before, vim.tbl_count(store.comments))
     assert.equals(1, #store:replies(root.id))
   end)
+
+  it("reads exact findings from the persisted Sidekick transcript", function()
+    local result = require("review.sidekick").transcript_result(source, dir, {
+      sessions = function(cwd)
+        assert.equals(dir, cwd)
+        return { { file = "session.jsonl" } }
+      end,
+      build = function()
+        return { turns = {
+          { prompt = "review head " .. source:head_rev(), blocks = {
+            { kind = "text", text = "Readable review.\n```json\n{\"reviewed_head_sha\":\""
+              .. source:head_rev() .. "\",\"new_comments\":[]}\n```" },
+          } },
+        } }
+      end,
+    })
+    assert.is_truthy(result:find("Readable review", 1, true))
+    local findings = require("review.claude.contract").extract_findings(result)
+    assert.equals(source:head_rev(), findings.reviewed_head_sha)
+  end)
 end)
