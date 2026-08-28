@@ -4,7 +4,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 INIT=tests/minimal_init.lua
-SPECS=(anchor_spec source_spec contract_spec runner_spec ui_spec compose_spec regress_spec menu_spec)
+SPECS=(anchor_spec source_spec contract_spec runner_spec ui_spec compose_spec regress_spec menu_spec list_spec)
 fail=0
 
 for s in "${SPECS[@]}"; do

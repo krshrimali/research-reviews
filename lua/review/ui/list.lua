@@ -12,6 +12,41 @@ local config = require("review.config")
 
 local M = {}
 
+--- Export PR/branch picker rows to quickfix. Quickfix's native file fields are not
+--- enough for a logical review target, so retain the source item in `user_data` and
+--- make <CR> invoke the same callback as the picker.
+---@param items table[]
+---@param cwd string
+---@param on_choose fun(item:table)
+function M.to_quickfix(items, cwd, on_choose)
+  if not items or #items == 0 then
+    util.notify("no PRs or branches selected", vim.log.levels.WARN)
+    return
+  end
+  local qf = {}
+  for _, item in ipairs(items) do
+    qf[#qf + 1] = {
+      filename = cwd,
+      lnum = 1,
+      text = item.label,
+      user_data = { review_source = item },
+    }
+  end
+  vim.fn.setqflist({}, "r", { title = "Review · PRs and branches", items = qf })
+  vim.cmd("botright copen")
+  local qfbuf = vim.api.nvim_get_current_buf()
+  vim.keymap.set("n", "<CR>", function()
+    local info = vim.fn.getqflist({ idx = 0, items = 0 })
+    local entry = info.items[info.idx]
+    local item = entry and entry.user_data and entry.user_data.review_source
+    if item then
+      vim.cmd("cclose")
+      on_choose(item)
+    end
+  end, { buffer = qfbuf, nowait = true, desc = "open PR or branch review" })
+  util.notify(string.format("sent %d review source%s to quickfix", #qf, #qf == 1 and "" or "s"))
+end
+
 --- Local branches other than the current one.
 ---@param cwd string
 ---@return table[] items
@@ -83,7 +118,7 @@ end
 --- Present items via the configured picker; call on_choose(item).
 ---@param items table[]
 ---@param on_choose fun(item:table)
-local function present(items, on_choose)
+local function present(items, cwd, on_choose)
   local pref = config.get().picker
   local function try_snacks()
     local ok, snacks = util.has("snacks")
@@ -96,6 +131,19 @@ local function present(items, on_choose)
         return { text = it.label, item = it }
       end, items),
       format = "text",
+      actions = {
+        review_qflist = function(picker)
+          local selected = picker:selected()
+          local rows = #selected > 0 and selected or picker:items()
+          local sources = vim.tbl_map(function(row) return row.item end, rows)
+          picker:close()
+          M.to_quickfix(sources, cwd, on_choose)
+        end,
+      },
+      win = {
+        input = { keys = { ["<C-q>"] = { "review_qflist", mode = { "i", "n" } } } },
+        list = { keys = { ["<C-q>"] = "review_qflist" } },
+      },
       confirm = function(picker, choice)
         picker:close()
         if choice and choice.item then
@@ -118,12 +166,20 @@ local function present(items, on_choose)
     end
     fzf.fzf_exec(labels, {
       prompt = "review> ",
+      fzf_opts = { ["--multi"] = true },
       actions = {
         ["default"] = function(selected)
           local it = selected and by_label[selected[1]]
           if it then
             on_choose(it)
           end
+        end,
+        ["ctrl-q"] = function(selected)
+          local chosen = {}
+          for _, label in ipairs(selected or {}) do
+            if by_label[label] then chosen[#chosen + 1] = by_label[label] end
+          end
+          M.to_quickfix(chosen, cwd, on_choose)
         end,
       },
     })
@@ -168,7 +224,7 @@ function M.open(cwd, opts, on_choose)
     util.notify("no PRs or branches found", vim.log.levels.WARN)
     return
   end
-  present(items, on_choose)
+  present(items, cwd, on_choose)
 end
 
 return M
