@@ -96,6 +96,13 @@ local function pr_items(cwd, opts)
       ),
       search = string.format("#%d %s %s %s", pr.number, pr.title,
         pr.author and pr.author.login or "", table.concat(labels, " ")),
+      preview = {
+        title = pr.title, body = pr.body, author = pr.author and pr.author.login,
+        state = pr.state, draft = pr.isDraft, updated = pr.updatedAt,
+        head = pr.headRefName, base = pr.baseRefName, labels = labels,
+        assignees = vim.tbl_map(function(a) return a.login end, pr.assignees or {}),
+        review = pr.reviewDecision,
+      },
     }
   end
   return items
@@ -138,10 +145,49 @@ end
 
 M._filter_rows = filter_rows
 
+local function preview_lines(data, filters)
+  if data.review_filter then
+    local row = data.review_filter
+    return { "# Review filter", "", row.label, "", "Press Enter to apply this filter.", "",
+      ("Current state: `%s`"):format(filters.state),
+      ("Current sources: `%s`"):format(filters.source),
+      ("Current search: `%s`"):format(filters.search ~= "" and filters.search or "none") }
+  end
+  local item = data.review_source
+  if not item then return { "# Review picker", "", "Select a filter or review." } end
+  if item.kind == "branch" then
+    return { "# " .. item.arg, "", "Local branch", "", "Press Enter to review this branch." }
+  end
+  local p = item.preview or {}
+  local lines = {
+    ("# #%s · %s"):format(item.arg, p.title or "Pull request"), "",
+    ("**@%s** · `%s`%s"):format(p.author or "?", p.state or "?", p.draft and " · draft" or ""), "",
+    ("`%s` → `%s`"):format(p.head or "?", p.base or "?"), "",
+  }
+  if p.review and p.review ~= "" then vim.list_extend(lines, { "Review: **" .. p.review .. "**", "" }) end
+  if #(p.labels or {}) > 0 then vim.list_extend(lines, { "Labels: " .. table.concat(p.labels, ", "), "" }) end
+  if #(p.assignees or {}) > 0 then vim.list_extend(lines, { "Assignees: @" .. table.concat(p.assignees, ", @"), "" }) end
+  if p.updated and p.updated ~= "" then vim.list_extend(lines, { "Updated: " .. p.updated, "" }) end
+  vim.list_extend(lines, { "## Description", "", p.body and p.body ~= "" and p.body or "_No description._" })
+  return lines
+end
+
+M._preview_lines = preview_lines
+
 ---Always-visible, actionable quickfix picker. Filter rows mutate and rebuild the
 ---same list; result rows open reviews.
 function M.open_quickfix(cwd, on_choose)
   local filters = { state = "open", source = "both", search = "" }
+  local preview_buf, preview_win
+  local function update_preview()
+    if not preview_buf or not vim.api.nvim_buf_is_valid(preview_buf) then return end
+    local info = vim.fn.getqflist({ idx = 0, items = 0 })
+    local entry = info.items[info.idx]
+    local data = entry and entry.user_data or {}
+    vim.bo[preview_buf].modifiable = true
+    vim.api.nvim_buf_set_lines(preview_buf, 0, -1, false, preview_lines(data, filters))
+    vim.bo[preview_buf].modifiable = false
+  end
   local render
   render = function()
     local opts = {
@@ -169,6 +215,24 @@ function M.open_quickfix(cwd, on_choose)
     })
     vim.cmd("botright copen")
     local buf = vim.api.nvim_get_current_buf()
+    local qfwin = vim.api.nvim_get_current_win()
+    if not preview_win or not vim.api.nvim_win_is_valid(preview_win) then
+      preview_buf = vim.api.nvim_create_buf(false, true)
+      vim.bo[preview_buf].buftype, vim.bo[preview_buf].bufhidden = "nofile", "wipe"
+      vim.bo[preview_buf].filetype = "markdown"
+      preview_win = vim.api.nvim_open_win(preview_buf, false, {
+        split = "above", win = qfwin, height = math.max(8, math.floor(vim.o.lines * 0.32)),
+      })
+      vim.wo[preview_win].wrap, vim.wo[preview_win].linebreak = true, true
+      vim.wo[preview_win].winfixheight = true
+      pcall(vim.treesitter.start, preview_buf, "markdown")
+      vim.api.nvim_create_autocmd("CursorMoved", {
+        buffer = buf,
+        callback = update_preview,
+        desc = "Update review source preview",
+      })
+    end
+    update_preview()
     vim.keymap.set("n", "<CR>", function()
       local info = vim.fn.getqflist({ idx = 0, items = 0 })
       local entry = info.items[info.idx]
