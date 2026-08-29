@@ -27,7 +27,8 @@ end
 ---@param store table
 ---@return integer imported
 function M.import(source, store)
-  local threads = source:threads()
+  local threads, fetch_err = source:threads()
+  if fetch_err then return 0, fetch_err end
   if not threads or #threads == 0 then
     return 0
   end
@@ -49,17 +50,27 @@ function M.import(source, store)
         -- Refresh upstream-authoritative fields only. Upstream can RESOLVE a thread,
         -- but a local resolve is never reverted by re-import (would lose user intent).
         prev.body = cm.body or prev.body
-        if t.isResolved then
-          prev.status = "resolved"
-        end
+        prev.file, prev.side = path, side
+        prev.line_start, prev.line_end = line, line
+        prev.author = cm.author and cm.author.login or prev.author
+        prev.github_thread_id, prev.origin = t.id, "github"
+        if t.isResolved or prev.status == "resolved" then prev.status = "resolved"
+        elseif t.isOutdated then prev.status = "outdated"
+        else prev.status = "draft" end
+        local rev = side == "LEFT" and source:base_rev() or source:head_rev()
+        local lines = anchor.file_lines(meta.repo_root, rev, path) or {}
+        prev.anchor = anchor.compute(lines, math.min(line, math.max(1, #lines)))
+        if side == "LEFT" then prev.anchor.blob_sha = rev end
         prev.updated_at = now
         if i == 1 then
           root_local_id = prev.id
         end
         store.comments[prev.id] = prev
       else
-        local lines = anchor.file_lines(meta.repo_root, side == "LEFT" and source:base_rev() or nil, path) or {}
+        local rev = side == "LEFT" and source:base_rev() or source:head_rev()
+        local lines = anchor.file_lines(meta.repo_root, rev, path) or {}
         local a = anchor.compute(lines, math.min(line, math.max(1, #lines)))
+        if side == "LEFT" then a.blob_sha = rev end
         local comment = {
           id = util.uuid(),
           source_key = store.source_key,
@@ -74,7 +85,7 @@ function M.import(source, store)
           kind = (cm.body or ""):find("```suggestion") and "suggestion" or "normal",
           body = cm.body or "",
           origin = "github",
-          status = t.isResolved and "resolved" or "draft",
+          status = t.isResolved and "resolved" or (t.isOutdated and "outdated" or "draft"),
           github_id = gid,
           github_thread_id = t.id,
           in_reply_to = (i > 1) and root_local_id or nil,

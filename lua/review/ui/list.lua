@@ -14,6 +14,7 @@ local M = {}
 local pr_cache = {}
 local max_cache_entries = 64
 local picker_state, save_picker_state
+local picker_title
 
 local function cache_key(cwd, opts)
   return table.concat({ cwd, opts.state or "open", opts.search or "", tostring(opts.limit or 100) }, "\0")
@@ -25,6 +26,12 @@ local function cache_store(key, value)
   if #keys <= max_cache_entries then return end
   table.sort(keys, function(a, b) return pr_cache[a].at < pr_cache[b].at end)
   for i = 1, #keys - max_cache_entries do pr_cache[keys[i]] = nil end
+end
+
+local function cache_get(cwd, opts)
+  local hit = pr_cache[cache_key(cwd, opts)]
+  local ttl = config.get().picker_cache_ttl or 30
+  if not opts.refresh and hit and os.time() - hit.at < ttl then return vim.deepcopy(hit.value) end
 end
 
 --- Export PR/branch picker rows to quickfix. Quickfix's native file fields are not
@@ -104,41 +111,32 @@ M._commit_items = commit_items
 ---@param cwd string
 ---@param opts table
 ---@return table[] items
+local function pr_item(pr)
+  local labels = {}
+  for _, label in ipairs(pr.labels or {}) do labels[#labels + 1] = label.name end
+  return {
+    kind = "pr",
+    arg = pr.number,
+    label = string.format("#%-5d %s  @%s  %s%s", pr.number,
+      util.truncate(pr.title, 50), pr.author and pr.author.login or "?", pr.state or "",
+      pr.reviewDecision and ("  " .. pr.reviewDecision) or ""),
+    search = string.format("#%d %s %s %s", pr.number, pr.title,
+      pr.author and pr.author.login or "", table.concat(labels, " ")),
+  }
+end
+
 local function pr_items(cwd, opts)
   if not gh.available() then
     return {}
   end
   local key = cache_key(cwd, opts)
-  local hit = pr_cache[key]
-  local ttl = config.get().picker_cache_ttl or 30
-  local prs
-  if not opts.refresh and hit and os.time() - hit.at < ttl then
-    prs = vim.deepcopy(hit.value)
-  else
+  local prs = cache_get(cwd, opts)
+  if not prs then
     prs = gh.list_prs({ search = opts.search, limit = opts.limit or 100, state = opts.state }, cwd)
     cache_store(key, prs)
   end
   local items = {}
-  for _, pr in ipairs(prs) do
-    local labels = {}
-    for _, l in ipairs(pr.labels or {}) do
-      table.insert(labels, l.name)
-    end
-    items[#items + 1] = {
-      kind = "pr",
-      arg = pr.number,
-      label = string.format(
-        "#%-5d %s  @%s  %s%s",
-        pr.number,
-        util.truncate(pr.title, 50),
-        pr.author and pr.author.login or "?",
-        pr.state or "",
-        pr.reviewDecision and ("  " .. pr.reviewDecision) or ""
-      ),
-      search = string.format("#%d %s %s %s", pr.number, pr.title,
-        pr.author and pr.author.login or "", table.concat(labels, " ")),
-    }
-  end
+  for _, pr in ipairs(prs) do items[#items + 1] = pr_item(pr) end
   return items
 end
 
@@ -279,8 +277,7 @@ local function present(items, cwd, on_choose, opts)
       return false
     end
     snacks.picker.pick({
-      title = "review: pick PR / branch · " .. (opts.state or "open")
-        .. " (Tab state · r refresh · Ctrl-Q quickfix)",
+      title = picker_title(opts),
       items = vim.tbl_map(function(it)
         return { text = it.label, item = it }
       end, items),
@@ -447,6 +444,78 @@ local function present_static(items, cwd, title, on_choose)
   end)
 end
 
+local function source_label(opts)
+  if opts.prs_only then return "pull requests" end
+  return "pull requests + local branches"
+end
+
+picker_title = function(opts)
+  return string.format("review · filter: %s · %s (Tab filter · r refresh · Ctrl-Q quickfix)",
+    (opts.state or "open"):upper(), source_label(opts))
+end
+
+M._picker_title = picker_title
+
+local function present_snacks_loading(cwd, opts, on_choose, snacks)
+  local key = cache_key(cwd, opts)
+  local gh_bin = vim.env.PRTUI_GH_BIN or "gh"
+  local branches = opts.prs_only and {} or local_branches(cwd)
+  snacks.picker.pick({
+    title = picker_title(opts),
+    finder = function(_, ctx)
+      return function(cb)
+        for _, item in ipairs(branches) do cb({ text = item.label, item = item }) end
+        local collected = {}
+        local chunks = {}
+        require("snacks.picker.source.proc").proc({
+          cmd = gh_bin,
+          args = gh.list_prs_args(opts), cwd = cwd, raw = true,
+        }, ctx)(function(row) chunks[#chunks + 1] = row.text end)
+        local decoded = vim.json.decode(table.concat(chunks))
+        assert(vim.islist(decoded), "gh pr list did not return a JSON array")
+        local rendered = ctx.async:schedule(function()
+          for _, pr in ipairs(decoded) do collected[#collected + 1] = pr end
+          cache_store(key, collected)
+          return vim.tbl_map(pr_item, decoded)
+        end)
+        for _, item in ipairs(rendered) do cb({ text = item.label, item = item }) end
+      end
+    end,
+    format = "text",
+    actions = {
+      review_qflist = function(picker)
+        local selected = picker:selected()
+        local rows = #selected > 0 and selected or picker:items()
+        picker:close()
+        M.to_quickfix(vim.tbl_map(function(row) return row.item end, rows), cwd, on_choose)
+      end,
+      review_cycle_state = function(picker)
+        picker:close()
+        local next_opts = vim.tbl_extend("force", opts, { state = next_state(opts.state), refresh = nil })
+        save_picker_state(cwd, next_opts)
+        M.open(cwd, next_opts, on_choose)
+      end,
+      review_refresh = function(picker)
+        picker:close()
+        M.open(cwd, vim.tbl_extend("force", opts, { refresh = true }), on_choose)
+      end,
+    },
+    win = {
+      input = { keys = {
+        ["<C-q>"] = { "review_qflist", mode = { "i", "n" } },
+        ["<Tab>"] = { "review_cycle_state", mode = { "i", "n" } },
+      } },
+      list = { keys = {
+        ["<C-q>"] = "review_qflist", ["<Tab>"] = "review_cycle_state", ["r"] = "review_refresh",
+      } },
+    },
+    confirm = function(picker, choice)
+      picker:close()
+      if choice and choice.item then on_choose(choice.item) end
+    end,
+  })
+end
+
 function M.open_prs(cwd, on_choose)
   M.open(cwd, { prs_only = true }, on_choose)
 end
@@ -476,6 +545,15 @@ function M.open(cwd, opts, on_choose)
   end
   if not opts.state then opts.state = picker_state(cwd).state or "open" end
   save_picker_state(cwd, opts)
+  local has_snacks, snacks = util.has("snacks")
+  local wants_prs = not opts.branches_only
+  local cached = wants_prs and cache_get(cwd, opts) or nil
+  if has_snacks and snacks.picker and wants_prs and not cached
+      and vim.fn.executable(vim.env.PRTUI_GH_BIN or "gh") == 1 then
+    opts.refresh = nil
+    present_snacks_loading(cwd, opts, on_choose, snacks)
+    return
+  end
   local items = M.gather_items(cwd, opts)
   if #items == 0 then
     util.notify("no PRs or branches found", vim.log.levels.WARN)

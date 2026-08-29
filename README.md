@@ -41,6 +41,9 @@ current-branch, and combined pickers. The PR picker remembers its state per repo
 and all PRs, while `r` bypasses the short metadata cache. `:ReviewHealth` diagnoses
 dependencies/configuration, `:ReviewProfile` shows recent command timings, and
 `:ReviewHelp` is the searchable in-editor key and workflow reference.
+Cold PR loads are asynchronous and show a picker spinner; the title always names the
+active OPEN/CLOSED/MERGED/ALL filter. GitHub thread import is idempotent and refreshes
+moved/outdated thread metadata and nested replies.
 Use `:ReviewSync` to recover the latest Claude findings from its exact transcript.
 Diffview-native `REVIEW #n` comments are included in Claude requests; replies and new
 findings return to the inline diff and the left Comments section.

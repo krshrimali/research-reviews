@@ -422,7 +422,13 @@ function M.import_github_comments()
     util.notify("GitHub comment import requires a PR", vim.log.levels.WARN); return
   end
   M.current.source._threads = nil
-  local imported = require("review.comments.github_sync").import(M.current.source, M.current.store)
+  util.notify("importing GitHub review threads…")
+  vim.cmd("redraw")
+  local imported, err = require("review.comments.github_sync").import(M.current.source, M.current.store)
+  if err then
+    util.notify("GitHub comment import failed: " .. tostring(err), vim.log.levels.ERROR)
+    return
+  end
   require("review.ui.diff").refresh_markers(M.current.store)
   if require("review.ui.comments_panel").is_open() then
     require("review.ui.comments_panel").render(M.current.store, nil, "RIGHT")

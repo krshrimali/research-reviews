@@ -67,23 +67,26 @@ function M.repo_identity(cwd)
   }
 end
 
---- List open PRs (with optional search query). Returns a list of light PR records.
+function M.list_prs_args(opts)
+  opts = opts or {}
+  local argv = {
+    "pr", "list",
+    "--json", "number,title,author,state,isDraft,updatedAt,headRefName,baseRefName,labels,reviewDecision",
+    "--limit", tostring(opts.limit or 100),
+  }
+  if opts.state then vim.list_extend(argv, { "--state", opts.state }) end
+  if opts.search and opts.search ~= "" then vim.list_extend(argv, { "--search", opts.search }) end
+  return argv
+end
+
+--- List PRs (with optional search query). Returns a list of light PR records.
 ---@param opts table|nil { search=string, limit=integer, state=string }
 ---@param cwd string|nil
 ---@return table[] prs, string|nil err
 function M.list_prs(opts, cwd)
   opts = opts or {}
-  local argv = {
-    vim.env.PRTUI_GH_BIN or "gh", "pr", "list",
-    "--json", "number,title,author,state,isDraft,updatedAt,headRefName,baseRefName,labels,reviewDecision",
-    "--limit", tostring(opts.limit or 100),
-  }
-  if opts.state then
-    vim.list_extend(argv, { "--state", opts.state })
-  end
-  if opts.search and opts.search ~= "" then
-    vim.list_extend(argv, { "--search", opts.search })
-  end
+  local argv = { vim.env.PRTUI_GH_BIN or "gh" }
+  vim.list_extend(argv, M.list_prs_args(opts))
   local ok, out, err = proc.run(argv, { cwd = cwd })
   if not ok then
     return {}, err

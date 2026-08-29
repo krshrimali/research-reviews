@@ -243,7 +243,9 @@ impl Picker {
                 return true;
             }
         }
-        false
+        // Keep frames ticking only while the network request is active so the
+        // loading spinner animates without making the idle picker redraw.
+        self.loading
     }
 
     fn refilter(&mut self) {
@@ -411,9 +413,16 @@ impl Picker {
             .map(|&i| self.row(&self.items[i], &q.text))
             .collect();
         let count = self.filtered.len();
-        let scope = format!("{} PRs", self.pr_scope);
+        let scope = format!("filter: {}", self.pr_scope.to_uppercase());
         let title = if self.loading {
-            format!(" {count} shown · {scope} · loading… ")
+            const FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+            let tick = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| (d.as_millis() / 80) as usize);
+            format!(
+                " {count} shown · {scope} · {} loading… ",
+                FRAMES[tick % FRAMES.len()]
+            )
         } else {
             format!(" {count} shown · {scope} ")
         };

@@ -141,7 +141,8 @@ function GitHubPR:threads()
   if self._threads then
     return self._threads
   end
-  local nodes = gh.review_threads(self.owner, self.repo, self.number, self.repo_root)
+  local nodes, err = gh.review_threads(self.owner, self.repo, self.number, self.repo_root)
+  if err then return nodes or {}, err end
   self._threads = nodes or {}
   return self._threads
 end

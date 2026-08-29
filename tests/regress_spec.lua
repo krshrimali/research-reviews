@@ -58,6 +58,48 @@ describe("github_sync preserves local resolution", function()
     sync.import(fake, store)
     assert.equals("resolved", store:get(root.id).status)
   end)
+
+  it("imports reply chains idempotently and refreshes moved metadata", function()
+    local _, source, store = setup()
+    local node = {
+      id = "T2", isResolved = false, isOutdated = false, path = "src/auth.lua", line = 2,
+      diffSide = "RIGHT", comments = { nodes = {
+        { id = "C2", author = { login = "alice" }, body = "root", createdAt = "2026-01-01T00:00:00Z" },
+        { id = "C3", author = { login = "bob" }, body = "reply", createdAt = "2026-01-02T00:00:00Z" },
+      } },
+    }
+    local fake = {
+      threads = function() return { node } end,
+      metadata = function() return source:metadata() end,
+      base_rev = function() return source:base_rev() end,
+      head_rev = function() return source:head_rev() end,
+    }
+    local sync = require("review.comments.github_sync")
+    assert.equals(2, sync.import(fake, store))
+    assert.equals(0, sync.import(fake, store))
+    assert.equals(1, #store:all_threads())
+    local root = store:all_threads()[1]
+    assert.equals(1, #store:replies(root.id))
+    assert.equals("bob", store:replies(root.id)[1].author)
+    node.line, node.isOutdated = 3, true
+    node.comments.nodes[1].body = "updated root"
+    assert.equals(0, sync.import(fake, store))
+    root = store:get(root.id)
+    assert.equals(3, root.line_start)
+    assert.equals("updated root", root.body)
+    assert.equals("outdated", root.status)
+  end)
+
+  it("returns upstream import failures to the caller", function()
+    local _, source, store = setup()
+    local fake = {
+      threads = function() return {}, "corporate GitHub unavailable" end,
+      metadata = function() return source:metadata() end,
+    }
+    local imported, err = require("review.comments.github_sync").import(fake, store)
+    assert.equals(0, imported)
+    assert.equals("corporate GitHub unavailable", err)
+  end)
 end)
 
 describe("reanchor leaves LEFT-side file paths alone on rename", function()
