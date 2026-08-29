@@ -255,12 +255,9 @@ end
 --- Open the contextual action menu — the single key users learn.
 function M.menu()
   local menu = require("review.ui.menu")
-  -- No active review → the only action is to start one.
+  -- No active review → choose the type of repository object to review.
   if not M.current then
-    menu.open({
-      { key = "l", label = "Start a review (pick PR / branch)", fn = M.open_list },
-      { key = "?", label = "Help and key reference", fn = M.help },
-    }, { title = "Review" })
+    M.choose_source()
     return
   end
 
@@ -306,10 +303,21 @@ function M.menu()
   items[#items + 1] = { key = "R", label = "Claude review sessions", fn = M.claude_sessions }
   items[#items + 1] = { key = "O", label = "Overview (description, commits, threads)", fn = M.show_overview }
   items[#items + 1] = { key = "P", label = "Toggle comments panel", fn = M.toggle_comments_panel }
-  items[#items + 1] = { key = "L", label = "Switch to another PR / branch", fn = M.open_list }
+  items[#items + 1] = { key = "L", label = "Choose another review target", fn = M.choose_source }
   items[#items + 1] = { key = "?", label = "Help and key reference", fn = M.help }
 
   menu.open(items, { title = "Review · " .. M.current.source:title() })
+end
+
+function M.choose_source()
+  require("review.ui.menu").open({
+    { key = "p", label = "Pull request", fn = M.open_pull_requests },
+    { key = "b", label = "Local branch", fn = M.open_branches },
+    { key = "c", label = "Single commit", fn = M.open_commits },
+    { key = "h", label = "Current branch against its base", fn = M.open_current },
+    { key = "l", label = "Combined PR / branch picker", fn = M.open_list },
+    { key = "?", label = "Help and key reference", fn = M.help },
+  }, { title = "Review target" })
 end
 
 function M.help()
@@ -317,10 +325,10 @@ function M.help()
 end
 
 --- Open a review for a source argument (PR number/url, branch, or ".").
----@param arg string|integer|nil
+---@param arg string|integer|table|nil
 ---@param opts table|nil { base=string }
 function M.open(arg, opts)
-  opts = opts or {}
+  opts = vim.tbl_extend("force", { base = config.get().local_base }, opts or {})
   local Source = require("review.source")
   local source, err = Source.create(arg, opts.cwd or vim.fn.getcwd(), opts)
   if not source then
@@ -362,12 +370,35 @@ function M.open_list()
   end)
 end
 
+local function choose_with(open_picker)
+  open_picker(vim.fn.getcwd(), function(item) M.open(item.arg) end)
+end
+
+function M.open_pull_requests()
+  choose_with(require("review.ui.list").open_prs)
+end
+
+function M.open_branches()
+  choose_with(require("review.ui.list").open_branches)
+end
+
+function M.open_commits()
+  choose_with(require("review.ui.list").open_commits)
+end
+
+function M.open_current()
+  M.open(".")
+end
+
 function M.refresh()
   if not M.current then return end
   local old = M.current.source
   local before_threads, before_head = #M.current.store:all_threads(), old:head_rev()
   local ctx = require("review.ui.diff").context()
-  local arg = old:kind() == "pr" and old.number or old.branch
+  local arg
+  if old:kind() == "pr" then arg = old.number
+  elseif old:kind() == "commit" then arg = { kind = "commit", rev = old.rev }
+  else arg = old.branch end
   local Source = require("review.source")
   util.notify("refreshing metadata, commits, checks, and threads…")
   local fresh, err = Source.create(arg, old:metadata().repo_root, { base = old.base_ref })

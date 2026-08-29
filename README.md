@@ -35,7 +35,9 @@ thread inbox. The inbox supports `/` search, `f` status filters, `Space` multi-s
 `a` scoped Claude review, `I` GitHub import, `Q` quickfix export, and `p` draft publishing.
 In the PR/branch picker, select rows and press `<C-q>` to send them to quickfix;
 `<Enter>` on a quickfix row opens that PR or branch review.
-The picker remembers its PR state per repository; `<Tab>` cycles open, closed, merged,
+With no review open, `<leader>p` lists focused PR, local-branch, single-commit,
+current-branch, and combined pickers. The PR picker remembers its state per repository;
+`<Tab>` cycles open, closed, merged,
 and all PRs, while `r` bypasses the short metadata cache. `:ReviewHealth` diagnoses
 dependencies/configuration, `:ReviewProfile` shows recent command timings, and
 `:ReviewHelp` is the searchable in-editor key and workflow reference.

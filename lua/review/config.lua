@@ -17,6 +17,7 @@ M.defaults = {
   -- Fuzzy picker backend for the source list.
   picker = "auto", -- "auto" | "snacks" | "telescope" | "builtin"
   picker_cache_ttl = 30, -- seconds; explicit refresh bypasses the cache
+  commit_picker_limit = 200,
 
   -- Number of context lines kept visible around a hunk when folded.
   fold_context = 3,

@@ -83,6 +83,23 @@ local function local_branches(cwd)
   return items
 end
 
+local function commit_items(cwd, limit)
+  local items = {}
+  for _, commit in ipairs(git.recent_commits(limit or 200, cwd)) do
+    items[#items + 1] = {
+      kind = "commit",
+      arg = { kind = "commit", rev = commit.sha },
+      label = string.format("●  %s  %s  @%s", commit.short,
+        util.truncate(commit.subject, 64), commit.author or "?"),
+      search = table.concat({ commit.sha, commit.short or "", commit.subject or "",
+        commit.body or "", commit.author or "" }, " "),
+    }
+  end
+  return items
+end
+
+M._commit_items = commit_items
+
 --- PRs as picker items. `search` is passed to gh (fuzzy server-side filter).
 ---@param cwd string
 ---@param opts table
@@ -375,6 +392,75 @@ local function present(items, cwd, on_choose, opts)
       on_choose(it)
     end
   end)
+end
+
+local function present_static(items, cwd, title, on_choose)
+  local ok, snacks = util.has("snacks")
+  if ok and snacks.picker then
+    snacks.picker.pick({
+      title = title .. " (Ctrl-Q quickfix)",
+      items = vim.tbl_map(function(item) return { text = item.label, item = item } end, items),
+      format = "text",
+      actions = {
+        review_qflist = function(picker)
+          local selected = picker:selected()
+          local rows = #selected > 0 and selected or picker:items()
+          picker:close()
+          M.to_quickfix(vim.tbl_map(function(row) return row.item end, rows), cwd, on_choose)
+        end,
+      },
+      win = {
+        input = { keys = { ["<C-q>"] = { "review_qflist", mode = { "i", "n" } } } },
+        list = { keys = { ["<C-q>"] = "review_qflist" } },
+      },
+      confirm = function(picker, choice)
+        picker:close()
+        if choice and choice.item then on_choose(choice.item) end
+      end,
+    })
+    return
+  end
+  local has_fzf, fzf = util.has("fzf-lua")
+  if has_fzf then
+    local labels, by_label = {}, {}
+    for _, item in ipairs(items) do labels[#labels + 1], by_label[item.label] = item.label, item end
+    fzf.fzf_exec(labels, {
+      prompt = title .. "> ", fzf_opts = { ["--multi"] = true },
+      actions = {
+        ["default"] = function(selected)
+          local item = selected and by_label[selected[1]]
+          if item then on_choose(item) end
+        end,
+        ["ctrl-q"] = function(selected)
+          local chosen = {}
+          for _, label in ipairs(selected or {}) do
+            if by_label[label] then chosen[#chosen + 1] = by_label[label] end
+          end
+          M.to_quickfix(chosen, cwd, on_choose)
+        end,
+      },
+    })
+    return
+  end
+  vim.ui.select(items, { prompt = title, format_item = function(item) return item.label end }, function(item)
+    if item then on_choose(item) end
+  end)
+end
+
+function M.open_prs(cwd, on_choose)
+  M.open(cwd, { prs_only = true }, on_choose)
+end
+
+function M.open_branches(cwd, on_choose)
+  local items = local_branches(cwd)
+  if #items == 0 then util.notify("no local branches found", vim.log.levels.WARN); return end
+  present_static(items, cwd, "review: pick local branch", on_choose)
+end
+
+function M.open_commits(cwd, on_choose)
+  local items = commit_items(cwd, config.get().commit_picker_limit)
+  if #items == 0 then util.notify("no commits found", vim.log.levels.WARN); return end
+  present_static(items, cwd, "review: pick commit", on_choose)
 end
 
 --- Open the picker.

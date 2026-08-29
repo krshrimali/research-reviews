@@ -3,22 +3,29 @@
 
 local LocalBranch = require("review.source.local_branch")
 local GitHubPR = require("review.source.github_pr")
+local Commit = require("review.source.commit")
 
 local M = {}
 
 M.LocalBranch = LocalBranch
 M.GitHubPR = GitHubPR
+M.Commit = Commit
 
 --- Build a source from a user argument.
 ---   number | "#123" | PR URL  -> GitHubPR
 ---   "." | "" | branch name    -> LocalBranch
----@param arg string|integer|nil
+---   { kind="commit", rev=sha } -> Commit
+---@param arg string|integer|table|nil
 ---@param cwd string
 ---@param opts table|nil { base=string }
 ---@return table|nil source, string|nil err
 function M.create(arg, cwd, opts)
   cwd = cwd or vim.fn.getcwd()
   opts = opts or {}
+
+  if type(arg) == "table" and arg.kind == "commit" then
+    return Commit.new(cwd, arg.rev)
+  end
 
   if type(arg) == "number" then
     return GitHubPR.new(arg, cwd)

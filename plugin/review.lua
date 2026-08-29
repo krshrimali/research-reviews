@@ -19,6 +19,15 @@ vim.api.nvim_create_user_command("ReviewList", function()
   review().open_list()
 end, { desc = "Pick a PR/branch to review" })
 
+vim.api.nvim_create_user_command("ReviewPRs", function() review().open_pull_requests() end,
+  { desc = "Pick a pull request to review" })
+vim.api.nvim_create_user_command("ReviewBranches", function() review().open_branches() end,
+  { desc = "Pick a local branch to review" })
+vim.api.nvim_create_user_command("ReviewCommits", function() review().open_commits() end,
+  { desc = "Pick a commit to review" })
+vim.api.nvim_create_user_command("ReviewCurrent", function() review().open_current() end,
+  { desc = "Review the current branch against its base" })
+
 -- :ReviewClaude — dispatch an async Claude review.
 vim.api.nvim_create_user_command("ReviewClaude", function()
   review().claude_review()

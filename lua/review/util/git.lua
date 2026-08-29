@@ -114,15 +114,54 @@ function M.commits(base, head, cwd)
   return commits
 end
 
+local commit_format = "%H%x1f%h%x1f%s%x1f%b%x1f%an%x1f%aI"
+
+local function parse_commit(record)
+  local fields = vim.split(record:gsub("%s+$", ""), "\31", { plain = true })
+  if not fields[1] or fields[1] == "" then return nil end
+  return {
+    sha = fields[1], short = fields[2], subject = fields[3] or "",
+    body = (fields[4] or ""):gsub("%s+$", ""), author = fields[5] or "", date = fields[6] or "",
+  }
+end
+
+---@param rev string
+---@param cwd string|nil
+---@return table|nil
+function M.commit_info(rev, cwd)
+  local ok, out = proc.git({ "show", "-s", "--format=" .. commit_format, rev }, cwd)
+  return ok and parse_commit(out) or nil
+end
+
+---@param limit integer|nil
+---@param cwd string|nil
+---@return table[]
+function M.recent_commits(limit, cwd)
+  local format = commit_format .. "%x1e"
+  local ok, out = proc.git({ "log", "--all", "--date-order", "-n", tostring(limit or 200),
+    "--format=" .. format }, cwd)
+  if not ok then return {} end
+  local commits = {}
+  for record in vim.gsplit(out, "\30", { trimempty = true }) do
+    local parsed = parse_commit(record:gsub("^%s+", ""))
+    if parsed then commits[#commits + 1] = parsed end
+  end
+  return commits
+end
+
 --- Changed files for diff base...head (three-dot: relative to merge-base).
 ---@param base string
 ---@param head string
 ---@param cwd string|nil
+---@param opts table|nil { exact=boolean } exact compares base and head directly
 ---@return table[] list of {path, old_path?, status, additions, deletions}
-function M.changed_files(base, head, cwd)
-  local range = base .. "..." .. head
+function M.changed_files(base, head, cwd, opts)
+  opts = opts or {}
+  local revs = opts.exact and { base, head } or { base .. "..." .. head }
   -- Name + status (handles renames): --name-status -M.
-  local ok, name_out = proc.git({ "diff", "--name-status", "-M", range }, cwd)
+  local name_args = { "diff", "--name-status", "-M" }
+  vim.list_extend(name_args, revs)
+  local ok, name_out = proc.git(name_args, cwd)
   if not ok then
     return {}
   end
@@ -147,7 +186,9 @@ function M.changed_files(base, head, cwd)
     end
   end
   -- Merge in numeric add/del counts.
-  local nok, num_out = proc.git({ "diff", "--numstat", "-M", range }, cwd)
+  local num_args = { "diff", "--numstat", "-M" }
+  vim.list_extend(num_args, revs)
+  local nok, num_out = proc.git(num_args, cwd)
   if nok then
     for line in vim.gsplit(num_out, "\n", { trimempty = true }) do
       local add, del, path = line:match("^(%S+)%s+(%S+)%s+(.+)$")

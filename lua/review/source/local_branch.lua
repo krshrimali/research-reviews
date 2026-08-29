@@ -25,9 +25,9 @@ function LocalBranch.new(cwd, opts)
     return nil, "not inside a git repository"
   end
   local branch = opts.branch or git.current_branch(root) or "HEAD"
-  local head_sha = git.rev_parse("HEAD", root)
+  local head_sha = git.rev_parse(branch, root)
   if not head_sha then
-    return nil, "cannot resolve HEAD"
+    return nil, "cannot resolve branch: " .. tostring(branch)
   end
 
   local base_ref, base_sha
@@ -39,7 +39,7 @@ function LocalBranch.new(cwd, opts)
     end
   else
     local default = git.default_branch(root)
-    base_sha = git.merge_base("HEAD", default, root)
+    base_sha = git.merge_base(head_sha, default, root)
     if not base_sha then
       -- Fall back to the default branch tip if no common ancestor.
       base_sha = git.rev_parse(default, root) or head_sha

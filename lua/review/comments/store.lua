@@ -78,7 +78,9 @@ function Store:add(fields)
   local meta = self.source:metadata()
   local side = fields.side or "RIGHT"
   local rev = (side == "LEFT") and self.source:base_rev() or self.source:head_rev()
-  local lines = anchor.file_lines(meta.repo_root, side == "LEFT" and rev or nil, fields.file) or {}
+  -- Always anchor against the reviewed revision. The selected branch or commit may
+  -- not be checked out in the user's working tree.
+  local lines = anchor.file_lines(meta.repo_root, rev, fields.file) or {}
   local a = anchor.compute(lines, fields.line_start)
   if side == "LEFT" then
     a.blob_sha = rev
