@@ -100,7 +100,7 @@ function Store:add(fields)
     origin = fields.origin or "local",
     status = "draft",
     in_reply_to = nil,
-    author = vim.env.USER or "you",
+    author = fields.author or (fields.origin == "claude" and "claude") or vim.env.USER or "you",
     created_at = now,
     updated_at = now,
     hidden = false,
@@ -113,7 +113,7 @@ end
 --- Reply to an existing comment (creates a child in the same thread/location).
 ---@param parent_id string
 ---@param body string
----@param opts table|nil { origin?, suggestion_text? }
+---@param opts table|nil { origin?, suggestion_text?, author? }
 ---@return table|nil comment, string|nil err
 function Store:reply(parent_id, body, opts)
   opts = opts or {}
@@ -131,7 +131,7 @@ function Store:reply(parent_id, body, opts)
   comment.suggestion_text = opts.suggestion_text
   comment.kind = opts.suggestion_text and "suggestion" or "normal"
   comment.github_id = nil
-  comment.author = vim.env.USER or "you"
+  comment.author = opts.author or (opts.origin == "claude" and "claude") or vim.env.USER or "you"
   comment.created_at = now
   comment.updated_at = now
   self.comments[comment.id] = comment

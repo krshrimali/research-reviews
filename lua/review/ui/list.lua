@@ -11,6 +11,21 @@ local util = require("review.util")
 local config = require("review.config")
 
 local M = {}
+local pr_cache = {}
+local max_cache_entries = 64
+local picker_state, save_picker_state
+
+local function cache_key(cwd, opts)
+  return table.concat({ cwd, opts.state or "open", opts.search or "", tostring(opts.limit or 100) }, "\0")
+end
+
+local function cache_store(key, value)
+  pr_cache[key] = { at = os.time(), value = vim.deepcopy(value) }
+  local keys = vim.tbl_keys(pr_cache)
+  if #keys <= max_cache_entries then return end
+  table.sort(keys, function(a, b) return pr_cache[a].at < pr_cache[b].at end)
+  for i = 1, #keys - max_cache_entries do pr_cache[keys[i]] = nil end
+end
 
 --- Export PR/branch picker rows to quickfix. Quickfix's native file fields are not
 --- enough for a logical review target, so retain the source item in `user_data` and
@@ -76,7 +91,16 @@ local function pr_items(cwd, opts)
   if not gh.available() then
     return {}
   end
-  local prs = gh.list_prs({ search = opts.search, limit = opts.limit or 100, state = opts.state }, cwd)
+  local key = cache_key(cwd, opts)
+  local hit = pr_cache[key]
+  local ttl = config.get().picker_cache_ttl or 30
+  local prs
+  if not opts.refresh and hit and os.time() - hit.at < ttl then
+    prs = vim.deepcopy(hit.value)
+  else
+    prs = gh.list_prs({ search = opts.search, limit = opts.limit or 100, state = opts.state }, cwd)
+    cache_store(key, prs)
+  end
   local items = {}
   for _, pr in ipairs(prs) do
     local labels = {}
@@ -141,12 +165,13 @@ M._filter_rows = filter_rows
 ---Always-visible, actionable quickfix picker. Filter rows mutate and rebuild the
 ---same list; result rows open reviews.
 function M.open_quickfix(cwd, on_choose)
-  local filters = { state = "open", source = "both", search = "" }
+  local filters = { state = picker_state(cwd).state or "open", source = "both", search = "" }
   local render
-  render = function()
+  render = function(force_refresh)
     local opts = {
       state = filters.state,
       search = filters.search,
+      refresh = force_refresh == true,
       branches_only = filters.source == "branches",
       prs_only = filters.source == "prs",
     }
@@ -178,9 +203,12 @@ function M.open_quickfix(cwd, on_choose)
         on_choose(data.review_source)
       elseif data.review_filter then
         local row = data.review_filter
-        if row.action == "state" then filters.state = row.value
+        if row.action == "state" then
+          filters.state = row.value
+          save_picker_state(cwd, filters)
         elseif row.action == "source" then filters.source = row.value
         elseif row.action == "clear" then filters.search = ""
+        elseif row.action == "refresh" then render(true); return
         elseif row.action == "search" then
           vim.ui.input({ prompt = "Review search: ", default = filters.search }, function(value)
             if value ~= nil then filters.search = vim.trim(value); render() end
@@ -190,7 +218,8 @@ function M.open_quickfix(cwd, on_choose)
         render()
       end
     end, { buffer = buf, nowait = true, desc = "apply review filter or open review" })
-    vim.keymap.set("n", "r", render, { buffer = buf, nowait = true, desc = "refresh review list" })
+    vim.keymap.set("n", "r", function() render(true) end,
+      { buffer = buf, nowait = true, desc = "refresh review list" })
   end
   render()
 end
@@ -208,6 +237,23 @@ end
 
 M._next_state = next_state
 
+picker_state = function(cwd)
+  local state = require("review.state")
+  local doc = state.load(cwd, "__picker__")
+  return doc.meta.picker or {}
+end
+
+save_picker_state = function(cwd, opts)
+  local state = require("review.state")
+  local doc = state.load(cwd, "__picker__")
+  doc.meta.picker = { state = opts.state or "open" }
+  state.save(cwd, "__picker__", doc)
+end
+
+M._picker_state = picker_state
+M._save_picker_state = save_picker_state
+M._clear_cache = function() pr_cache = {} end
+
 local function present(items, cwd, on_choose, opts)
   local pref = config.get().picker
   local function try_snacks()
@@ -216,7 +262,8 @@ local function present(items, cwd, on_choose, opts)
       return false
     end
     snacks.picker.pick({
-      title = "review: pick PR / branch · " .. (opts.state or "open") .. " (Tab: cycle state)",
+      title = "review: pick PR / branch · " .. (opts.state or "open")
+        .. " (Tab state · r refresh · Ctrl-Q quickfix)",
       items = vim.tbl_map(function(it)
         return { text = it.label, item = it }
       end, items),
@@ -232,7 +279,12 @@ local function present(items, cwd, on_choose, opts)
         review_cycle_state = function(picker)
           picker:close()
           local next_opts = vim.tbl_extend("force", opts, { state = next_state(opts.state) })
+          save_picker_state(cwd, next_opts)
           M.open(cwd, next_opts, on_choose)
+        end,
+        review_refresh = function(picker)
+          picker:close()
+          M.open(cwd, vim.tbl_extend("force", opts, { refresh = true }), on_choose)
         end,
       },
       win = {
@@ -243,6 +295,7 @@ local function present(items, cwd, on_choose, opts)
         list = { keys = {
           ["<C-q>"] = "review_qflist",
           ["<Tab>"] = "review_cycle_state",
+          ["r"] = "review_refresh",
         } },
       },
       confirm = function(picker, choice)
@@ -281,6 +334,16 @@ local function present(items, cwd, on_choose, opts)
             if by_label[label] then chosen[#chosen + 1] = by_label[label] end
           end
           M.to_quickfix(chosen, cwd, on_choose)
+        end,
+        ["tab"] = function()
+          local next_opts = vim.tbl_extend("force", opts, { state = next_state(opts.state) })
+          save_picker_state(cwd, next_opts)
+          vim.schedule(function() M.open(cwd, next_opts, on_choose) end)
+        end,
+        ["ctrl-r"] = function()
+          vim.schedule(function()
+            M.open(cwd, vim.tbl_extend("force", opts, { refresh = true }), on_choose)
+          end)
         end,
       },
     })
@@ -325,12 +388,14 @@ function M.open(cwd, opts, on_choose)
     M.open_quickfix(cwd, on_choose)
     return
   end
-  opts.state = opts.state or "open"
+  if not opts.state then opts.state = picker_state(cwd).state or "open" end
+  save_picker_state(cwd, opts)
   local items = M.gather_items(cwd, opts)
   if #items == 0 then
     util.notify("no PRs or branches found", vim.log.levels.WARN)
     return
   end
+  opts.refresh = nil -- refresh is a one-shot cache bypass, never sticky picker state
   present(items, cwd, on_choose, opts)
 end
 

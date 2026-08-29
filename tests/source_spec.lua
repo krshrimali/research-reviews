@@ -91,6 +91,16 @@ describe("comment store round-trip", function()
     assert.equals(root.id, replies[1].in_reply_to)
   end)
 
+  it("attributes agent-authored roots and replies to Claude", function()
+    local store = Store.for_source(source)
+    local root = store:add({
+      file = "src/auth.lua", side = "RIGHT", line_start = 2, body = "finding", origin = "claude",
+    })
+    local reply = store:reply(root.id, "answer", { origin = "claude" })
+    assert.equals("claude", root.author)
+    assert.equals("claude", reply.author)
+  end)
+
   it("resolves and deletes threads", function()
     local store = Store.for_source(source)
     local root = store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 2, body = "x" })

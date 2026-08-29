@@ -207,6 +207,12 @@ function M.start(opts)
   }, function(ok, _, stderr, code)
     M.jobs[session_id] = nil
     session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    if session.state == "cancelled" or session.state == "timed_out" then
+      store.sessions[session_id] = session
+      store:save()
+      if opts.on_done then opts.on_done(session) end
+      return
+    end
     if not ok then
       session.state = "error"
       session.error = string.format("claude exited %d: %s", code, (stderr or ""):sub(1, 500))
@@ -243,30 +249,50 @@ function M.start(opts)
     end
   end)
 
-  M.jobs[session_id] = handle
+  M.jobs[session_id] = { handle = handle, session = session, store = store }
+  local timeout = cfg.timeout_ms or 0
+  if timeout > 0 then
+    vim.defer_fn(function()
+      if M.jobs[session_id] then M.kill(session_id, "timed_out") end
+    end, timeout)
+  end
   return session
 end
 
 --- Kill a running session.
 ---@param session_id string
-function M.kill(session_id)
-  local h = M.jobs[session_id]
-  if h then
-    pcall(function()
-      h:kill(15)
-    end)
+function M.kill(session_id, state)
+  local job = M.jobs[session_id]
+  if job then
+    job.session.state = state or "cancelled"
+    job.session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+    job.session.error = nil
+    job.store.sessions[session_id] = job.session
+    job.store:save()
+    pcall(function() job.handle:kill(15) end)
     M.jobs[session_id] = nil
+    return true
   end
+  return false
+end
+
+function M.retry(session, store, callbacks)
+  callbacks = callbacks or {}
+  return M.start({
+    store = store,
+    source = store.source,
+    instruction = session.instruction or "",
+    allow_edits = session.allow_edits,
+    auto_resolve = session.auto_resolve,
+    on_progress = callbacks.on_progress,
+    on_done = callbacks.on_done,
+  })
 end
 
 --- Kill all running jobs (VimLeavePre).
 function M.kill_all()
-  for id, h in pairs(M.jobs) do
-    pcall(function()
-      h:kill(15)
-    end)
-    M.jobs[id] = nil
-  end
+  local ids = vim.tbl_keys(M.jobs)
+  for _, id in ipairs(ids) do M.kill(id) end
 end
 
 return M

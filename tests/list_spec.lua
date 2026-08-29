@@ -8,6 +8,35 @@ describe("review source quickfix", function()
     assert.equals("open", list._next_state("all"))
   end)
 
+  it("persists picker state per repository", function()
+    local state = require("review.state")
+    local root = vim.fn.tempname()
+    state.set_root(root)
+    list._save_picker_state("/repo/a", { state = "merged" })
+    list._save_picker_state("/repo/b", { state = "closed" })
+    assert.equals("merged", list._picker_state("/repo/a").state)
+    assert.equals("closed", list._picker_state("/repo/b").state)
+    state.set_root(nil)
+  end)
+
+  it("caches PR metadata until an explicit refresh", function()
+    local gh = require("review.util.gh")
+    local available, list_prs = gh.available, gh.list_prs
+    local calls = 0
+    gh.available = function() return true end
+    gh.list_prs = function()
+      calls = calls + 1
+      return { { number = 1, title = "One", author = { login = "me" }, labels = {} } }
+    end
+    list._clear_cache()
+    list.gather_items("/repo/cache", { state = "open", prs_only = true })
+    list.gather_items("/repo/cache", { state = "open", prs_only = true })
+    assert.equals(1, calls)
+    list.gather_items("/repo/cache", { state = "open", prs_only = true, refresh = true })
+    assert.equals(2, calls)
+    gh.available, gh.list_prs = available, list_prs
+  end)
+
   it("provides actionable state, source, search, and refresh filters", function()
     local rows = list._filter_rows({ state = "open", source = "both", search = "author:me" })
     local labels = vim.tbl_map(function(row) return row.label end, rows)

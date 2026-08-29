@@ -35,6 +35,10 @@ thread inbox. The inbox supports `/` search, `f` status filters, `Space` multi-s
 `a` scoped Claude review, `I` GitHub import, `Q` quickfix export, and `p` draft publishing.
 In the PR/branch picker, select rows and press `<C-q>` to send them to quickfix;
 `<Enter>` on a quickfix row opens that PR or branch review.
+The picker remembers its PR state per repository; `<Tab>` cycles open, closed, merged,
+and all PRs, while `r` bypasses the short metadata cache. `:ReviewHealth` diagnoses
+dependencies/configuration, `:ReviewProfile` shows recent command timings, and
+`:ReviewHelp` is the searchable in-editor key and workflow reference.
 Use `:ReviewSync` to recover the latest Claude findings from its exact transcript.
 Diffview-native `REVIEW #n` comments are included in Claude requests; replies and new
 findings return to the inline diff and the left Comments section.
@@ -68,6 +72,5 @@ Optional `~/.config/prtui/config.json`:
 
 ## Status
 
-Local review, inline comments, Claude reviews + follow-ups, themes, and a Comments view are
-implemented and covered by tests. In progress (see `docs/`): publishing reviews back to GitHub,
-richer comment management, and commit-level navigation.
+Local review, inline comments, Claude reviews + follow-ups, GitHub publishing previews,
+themes, commit navigation, and a Comments view are implemented and covered by tests.

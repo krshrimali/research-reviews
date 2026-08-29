@@ -111,4 +111,19 @@ describe("claude runner (fake claude)", function()
     assert.is_truthy(prompt:find("comment_id: diffview:2", 1, true))
     assert.is_truthy(prompt:find("What is this doing?", 1, true))
   end)
+
+  it("persists cancellation instead of leaving a session running", function()
+    local runner = require("review.claude.runner")
+    local killed = false
+    local session = { id = "cancel-me", state = "running" }
+    runner.jobs[session.id] = {
+      handle = { kill = function() killed = true end }, session = session, store = store,
+    }
+    assert.is_true(runner.kill(session.id))
+    assert.is_true(killed)
+    assert.equals("cancelled", session.state)
+    assert.is_nil(runner.jobs[session.id])
+    local reloaded = require("review.comments.store").for_source(source)
+    assert.equals("cancelled", reloaded.sessions[session.id].state)
+  end)
 end)

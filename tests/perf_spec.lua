@@ -1,0 +1,10 @@
+describe("review performance report", function()
+  it("keeps bounded timing records and renders them", function()
+    local perf = require("review.perf")
+    perf.records = {}
+    perf.record("process", "gh pr list", 12.34, true)
+    local text = table.concat(perf.report(), "\n")
+    assert.is_truthy(text:find("gh pr list", 1, true))
+    assert.is_truthy(text:find("12.3 ms", 1, true))
+  end)
+end)

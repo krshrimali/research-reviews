@@ -11,6 +11,7 @@ local M = {}
 function M.run(argv, opts)
   opts = opts or {}
   assert(type(argv) == "table" and #argv > 0, "proc.run: argv must be a non-empty list")
+  local started = vim.uv.hrtime()
   local res = vim
     .system(argv, {
       cwd = opts.cwd,
@@ -21,6 +22,8 @@ function M.run(argv, opts)
     :wait(opts.timeout or 30000)
   local out = res.stdout or ""
   local err = res.stderr or ""
+  require("review.perf").record("process", table.concat(argv, " ", 1, math.min(#argv, 3)),
+    (vim.uv.hrtime() - started) / 1e6, res.code == 0)
   return res.code == 0, out, err, res.code
 end
 
@@ -32,6 +35,7 @@ end
 ---@return vim.SystemObj
 function M.spawn(argv, opts, on_exit)
   opts = opts or {}
+  local started = vim.uv.hrtime()
   local stdout_cb
   if opts.on_stdout then
     -- Stream line-buffered stdout to the callback.
@@ -63,6 +67,8 @@ function M.spawn(argv, opts, on_exit)
     stdout = stdout_cb,
   }, function(res)
     vim.schedule(function()
+      require("review.perf").record("process", table.concat(argv, " ", 1, math.min(#argv, 3)),
+        (vim.uv.hrtime() - started) / 1e6, res.code == 0)
       on_exit(res.code == 0, res.stdout or "", res.stderr or "", res.code)
     end)
   end)

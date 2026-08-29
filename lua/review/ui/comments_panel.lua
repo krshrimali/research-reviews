@@ -39,6 +39,69 @@ local function matches(root, filter, query)
   return true
 end
 
+local function add_body(lines, map, root, prefix, body)
+  local body_lines = vim.split(body or "", "\n", { plain = true })
+  for i = 2, math.min(#body_lines, 6) do
+    table.insert(lines, prefix .. body_lines[i]); map[#lines] = root
+  end
+  if #body_lines > 6 then
+    table.insert(lines, string.format("%s… %d more lines", prefix, #body_lines - 6)); map[#lines] = root
+  end
+end
+
+local function tree_insert(tree, root)
+  local parts = vim.split(root.file or "(unknown)", "/", { plain = true, trimempty = true })
+  local node = tree
+  for i = 1, math.max(0, #parts - 1) do
+    local part = parts[i]
+    node.dirs[part] = node.dirs[part] or { dirs = {}, files = {} }
+    node = node.dirs[part]
+  end
+  local file_name = parts[#parts] or "(unknown)"
+  node.files[file_name] = node.files[file_name] or {}
+  table.insert(node.files[file_name], root)
+end
+
+local function sorted_keys(tbl)
+  local keys = vim.tbl_keys(tbl)
+  table.sort(keys)
+  return keys
+end
+
+local function render_tree(node, depth, lines, map, store, selected)
+  local indent = string.rep("  ", depth)
+  for _, dirname in ipairs(sorted_keys(node.dirs)) do
+    table.insert(lines, indent .. "▾ " .. dirname .. "/")
+    render_tree(node.dirs[dirname], depth + 1, lines, map, store, selected)
+  end
+  for _, filename in ipairs(sorted_keys(node.files)) do
+    table.insert(lines, indent .. "▾ " .. filename)
+    for _, root in ipairs(node.files[filename]) do
+      local count = 1 + #store:replies(root.id)
+      local icon = root.status == "resolved" and "✓"
+        or (root.status == "outdated" and "⚠")
+        or (root.origin == "claude" and "★" or "●")
+      local checked = selected[root.id] and "[x]" or "[ ]"
+      local reaction_count = 0
+      for _, n in pairs(root.reactions or {}) do reaction_count = reaction_count + n end
+      local body = vim.split(root.body or "", "\n", { plain = true })
+      local suffix = count > 1 and string.format(" · %d messages", count) or ""
+      if reaction_count > 0 then suffix = suffix .. " · ♥" .. reaction_count end
+      local prefix = indent .. "  "
+      table.insert(lines, string.format("%s%s %s @%s: %s%s", prefix, checked, icon,
+        root.author or "unknown", body[1] or "", suffix))
+      map[#lines] = root
+      add_body(lines, map, root, prefix .. "    ", root.body)
+      for _, reply in ipairs(store:replies(root.id)) do
+        local reply_body = vim.split(reply.body or "", "\n", { plain = true })
+        table.insert(lines, string.format("%s    ↳ @%s: %s", prefix, reply.author or "unknown", reply_body[1] or ""))
+        map[#lines] = root
+        add_body(lines, map, root, prefix .. "      ", reply.body)
+      end
+    end
+  end
+end
+
 local function build(store, file, filter, query, selected)
   local lines, map = {}, {}
   local all = file and store:threads_for_file(file) or store:all_threads()
@@ -59,24 +122,9 @@ local function build(store, file, filter, query, selected)
   if #threads == 0 then
     table.insert(lines, "(no matching threads)")
   end
-  for _, root in ipairs(threads) do
-    local count = 1 + #store:replies(root.id)
-    local icon = root.status == "resolved" and "✓"
-      or (root.status == "outdated" and "⚠")
-      or (root.origin == "claude" and "★" or "▸")
-    local checked = selected[root.id] and "[x]" or "[ ]"
-    local reaction_count = 0
-    for _, n in pairs(root.reactions or {}) do reaction_count = reaction_count + n end
-    local head = string.format("%s %s %s:%d · %s · %d%s", checked, icon, root.file or "?",
-      root.line_start or 0, root.author or "", count, reaction_count > 0 and (" · ♥" .. reaction_count) or "")
-    table.insert(lines, head)
-    map[#lines] = root
-    local body = vim.split(root.body or "", "\n", { plain = true })
-    for i = 1, math.min(#body, 6) do
-      table.insert(lines, "    " .. body[i]); map[#lines] = root
-    end
-    if #body > 6 then table.insert(lines, string.format("    … %d more lines", #body - 6)); map[#lines] = root end
-  end
+  local tree = { dirs = {}, files = {} }
+  for _, root in ipairs(threads) do tree_insert(tree, root) end
+  render_tree(tree, 0, lines, map, store, selected)
   local general = {}
   for _, session in pairs(store.sessions or {}) do
     for _, finding in ipairs(session.findings or {}) do
@@ -92,6 +140,9 @@ local function build(store, file, filter, query, selected)
   table.insert(lines, "f filter · / search · Q quickfix · r resolve · e edit · d delete · y copy · q close")
   return lines, map
 end
+
+
+M._build = build
 
 --- Render/refresh the panel content.
 ---@param store table

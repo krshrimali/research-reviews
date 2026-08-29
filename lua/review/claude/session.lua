@@ -11,6 +11,8 @@ local M = {}
 local function icon(s)
   if s.state == "running" then
     return "●"
+  elseif s.state == "cancelled" or s.state == "timed_out" then
+    return "■"
   elseif s.state == "error" then
     return "✗"
   elseif s.verdict == "request_changes" then
@@ -52,7 +54,7 @@ function M.list(store)
     map[#lines] = s
   end
   table.insert(lines, "")
-  table.insert(lines, "<CR> open  x kill  q close")
+  table.insert(lines, "<CR> open  x cancel  R retry  q close")
 
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
@@ -74,6 +76,13 @@ function M.list(store)
     if s and s.state == "running" then
       runner.kill(s.id)
       util.notify("killed session " .. s.id:sub(1, 8))
+    end
+  end)
+  map_key("R", function()
+    local s = map[vim.api.nvim_win_get_cursor(0)[1]]
+    if s and s.state ~= "running" then
+      local retried = runner.retry(s, store)
+      util.notify("retry started as " .. retried.id:sub(1, 8))
     end
   end)
   map_key("q", function()
@@ -147,7 +156,7 @@ function M.detail(s, store)
   end
   table.insert(lines, "")
   table.insert(lines, "---")
-  table.insert(lines, "v view implementation diff · o open worktree · p push with confirmation · q close")
+  table.insert(lines, "R retry · v view implementation diff · o open worktree · p push with confirmation · q close")
 
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
@@ -161,6 +170,11 @@ function M.detail(s, store)
   vim.keymap.set("n", "q", function()
     vim.cmd("tabclose")
   end, { buffer = buf, nowait = true })
+  vim.keymap.set("n", "R", function()
+    if s.state == "running" then return end
+    local retried = runner.retry(s, store)
+    util.notify("retry started as " .. retried.id:sub(1, 8))
+  end, { buffer = buf, desc = "retry Claude review" })
   vim.keymap.set("n", "v", function()
     if not s.cwd then return end
     local old = vim.fn.getcwd()

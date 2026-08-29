@@ -124,11 +124,15 @@ fn q_quits() {
 #[test]
 fn toggles_open_and_all_pr_scope() {
     let mut p = Picker::new(&fixture());
-    assert!(!p.showing_all_prs());
+    assert_eq!(p.pr_scope(), "open");
     p.on_key(code(KeyCode::Tab));
-    assert!(p.showing_all_prs());
+    assert_eq!(p.pr_scope(), "closed");
+    p.on_key(code(KeyCode::Tab));
+    assert_eq!(p.pr_scope(), "merged");
+    p.on_key(code(KeyCode::Tab));
+    assert_eq!(p.pr_scope(), "all");
     p.on_key(key('s'));
-    assert!(!p.showing_all_prs());
+    assert_eq!(p.pr_scope(), "open");
 }
 
 #[test]

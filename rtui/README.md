@@ -20,7 +20,8 @@ cargo build --release          # offline; crates are cached locally
 
 **Picker:** launching with no argument opens a fuzzy-filterable list of open **PRs**
 (fetched via `gh` in the background so startup never blocks) and **local branches**.
-`j`/`k` move, `/` (or `i`) search, `enter` opens, `r` refreshes, `t` theme, `q` quits.
+`j`/`k` move, `/` (or `i`) search, `enter` opens, and `tab` cycles
+**open → closed → merged → all** PRs. `r` refreshes, `t` changes theme, and `q` quits.
 From inside a review, press `P` to return to the picker.
 
 Search combines **GitHub-style qualifiers** with **fuzzy** free text, matched across all

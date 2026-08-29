@@ -259,6 +259,7 @@ function M.menu()
   if not M.current then
     menu.open({
       { key = "l", label = "Start a review (pick PR / branch)", fn = M.open_list },
+      { key = "?", label = "Help and key reference", fn = M.help },
     }, { title = "Review" })
     return
   end
@@ -301,13 +302,18 @@ function M.menu()
   items[#items + 1] = { key = "f", label = "Refresh PR and comments", fn = M.refresh }
   items[#items + 1] = { key = "i", label = "Import GitHub comments", fn = M.import_github_comments }
   items[#items + 1] = { key = "S", label = "Sync latest Claude findings", fn = M.sync_claude_result }
-  items[#items + 1] = { key = "q", label = "Export threads to quickfix", fn = M.threads_to_quickfix }
+  items[#items + 1] = { key = "Q", label = "Export threads to quickfix", fn = M.threads_to_quickfix }
   items[#items + 1] = { key = "R", label = "Claude review sessions", fn = M.claude_sessions }
   items[#items + 1] = { key = "O", label = "Overview (description, commits, threads)", fn = M.show_overview }
   items[#items + 1] = { key = "P", label = "Toggle comments panel", fn = M.toggle_comments_panel }
   items[#items + 1] = { key = "L", label = "Switch to another PR / branch", fn = M.open_list }
+  items[#items + 1] = { key = "?", label = "Help and key reference", fn = M.help }
 
   menu.open(items, { title = "Review · " .. M.current.source:title() })
+end
+
+function M.help()
+  require("review.ui.help").open()
 end
 
 --- Open a review for a source argument (PR number/url, branch, or ".").
@@ -513,13 +519,17 @@ function M.publish_threads(threads)
       side = root.side or "RIGHT", body = root.body }
   end
   local src, meta = M.current.source, M.current.source:metadata()
-  local result, err = require("review.util.gh").submit_review(meta.owner, meta.repo, meta.number, {
+  local payload = {
     commit_id = src:head_rev(), event = "COMMENT", body = "Review submitted from review.nvim", comments = comments,
-  }, meta.repo_root)
-  if not result then util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR); return end
-  for _, root in ipairs(drafts) do M.current.store:update(root.id, { status = "published" }) end
-  M.refresh()
-  util.notify(string.format("published %d review comments", #drafts))
+  }
+  require("review.ui.publish").open(payload, drafts, function()
+    local result, err = require("review.util.gh").submit_review(
+      meta.owner, meta.repo, meta.number, payload, meta.repo_root)
+    if not result then util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR); return end
+    for _, root in ipairs(drafts) do M.current.store:update(root.id, { status = "published" }) end
+    M.refresh()
+    util.notify(string.format("published %d review comments", #drafts))
+  end)
 end
 
 function M.react_to_thread(root)

@@ -51,3 +51,15 @@ vim.api.nvim_create_user_command("ReviewQuickfix", function() review().threads_t
 vim.api.nvim_create_user_command("ReviewClean", function()
   review().clean()
 end, { desc = "Prune review worktrees" })
+
+vim.api.nvim_create_user_command("ReviewHealth", function()
+  vim.cmd("checkhealth review")
+end, { desc = "Check review.nvim dependencies and configuration" })
+
+vim.api.nvim_create_user_command("ReviewProfile", function()
+  require("review.perf").open()
+end, { desc = "Show recent review.nvim operation timings" })
+
+vim.api.nvim_create_user_command("ReviewHelp", function()
+  review().help()
+end, { desc = "Open the review.nvim key and workflow reference" })

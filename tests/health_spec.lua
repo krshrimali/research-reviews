@@ -1,0 +1,5 @@
+describe("review health", function()
+  it("loads and exposes a health check", function()
+    assert.equals("function", type(require("review.health").check))
+  end)
+end)

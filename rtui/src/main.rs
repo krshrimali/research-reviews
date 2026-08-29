@@ -22,8 +22,28 @@ enum Mode {
     Review(Box<App>),
 }
 
+const HELP: &str = "prtui — review GitHub PRs and local branches in the terminal
+
+Usage: prtui [OPTIONS] [PR|URL|BRANCH|.]
+
+Options:
+  --base <REF>             Base revision for local branch reviews
+  --claude-bin <PATH>      Claude CLI executable
+  --cwd <PATH>             Repository working directory
+  --cleanup-worktrees      Remove managed worktrees older than 30 days
+  -h, --help               Print help
+  -V, --version            Print version";
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|arg| arg == "-h" || arg == "--help") {
+        println!("{HELP}");
+        return Ok(());
+    }
+    if args.iter().any(|arg| arg == "-V" || arg == "--version") {
+        println!("prtui {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let mut target: Option<String> = None;
     let mut base_arg: Option<String> = None;
     let mut claude_bin_arg: Option<String> = None;

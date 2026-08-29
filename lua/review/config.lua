@@ -16,6 +16,7 @@ M.defaults = {
 
   -- Fuzzy picker backend for the source list.
   picker = "auto", -- "auto" | "snacks" | "telescope" | "builtin"
+  picker_cache_ttl = 30, -- seconds; explicit refresh bypasses the cache
 
   -- Number of context lines kept visible around a hunk when folded.
   fold_context = 3,
@@ -51,6 +52,7 @@ M.defaults = {
     auto_resolve = false, -- opt-in: lets Claude flip resolved on threads
     model = nil, -- nil => claude CLI default
     extra_args = {}, -- appended to the claude argv
+    timeout_ms = 30 * 60 * 1000, -- cancel a wedged review after 30 minutes
   },
 }
 
