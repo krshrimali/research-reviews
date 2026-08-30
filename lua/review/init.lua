@@ -84,18 +84,9 @@ local function ctx_or_warn()
 end
 
 --- Reply to the thread under the cursor.
-function M.reply_at_cursor()
-  local markers = require("review.ui.markers")
+function M.reply_thread(root, on_done)
   local compose = require("review.ui.compose")
-  local ctx = ctx_or_warn()
-  if not ctx then
-    return
-  end
-  local root = markers.thread_at_cursor(M.current.store, ctx.file, ctx.side, ctx.line)
-  if not root then
-    util.notify("no thread on this line", vim.log.levels.INFO)
-    return
-  end
+  if not M.current or not root then return end
   compose.open({
     title = "Reply",
     on_submit = function(body, is_sugg, sugg)
@@ -111,10 +102,37 @@ function M.reply_at_cursor()
       end
       require("review.ui.diff").refresh_markers(M.current.store)
       if require("review.ui.comments_panel").is_open() then
-        require("review.ui.comments_panel").render(M.current.store, ctx.file, ctx.side)
+        require("review.ui.comments_panel").refresh()
       end
+      if on_done then on_done(reply) end
     end,
   })
+end
+
+function M.reply_at_cursor()
+  local ctx = ctx_or_warn()
+  if not ctx then return end
+  local root = require("review.ui.markers").thread_at_cursor(M.current.store, ctx.file, ctx.side, ctx.line)
+  if not root then util.notify("no thread on this line", vim.log.levels.INFO); return end
+  M.reply_thread(root)
+end
+
+function M.resolve_thread(root, on_done)
+  if not M.current or not root then return false end
+  local resolved = root.status ~= "resolved"
+  M.current.store:set_resolved(root.id, resolved)
+  if root.github_thread_id and M.current.source:kind() == "pr" then
+    local ok, err = require("review.util.gh").resolve_thread(root.github_thread_id, resolved,
+      M.current.source:metadata().repo_root)
+    if not ok then
+      M.current.store:set_resolved(root.id, not resolved)
+      util.notify("GitHub resolve failed: " .. tostring(err), vim.log.levels.WARN)
+      return false
+    end
+  end
+  require("review.ui.diff").refresh_markers(M.current.store)
+  if on_done then on_done(root) end
+  return true
 end
 
 --- Resolve/unresolve the thread under the cursor.
@@ -128,13 +146,7 @@ function M.resolve_at_cursor()
   if not root then
     return
   end
-  M.current.store:set_resolved(root.id, root.status ~= "resolved")
-  if root.github_thread_id and M.current.source:kind() == "pr" then
-    local ok, err = require("review.util.gh").resolve_thread(root.github_thread_id,
-      root.status == "resolved", M.current.source:metadata().repo_root)
-    if not ok then util.notify("GitHub resolve failed: " .. tostring(err), vim.log.levels.WARN) end
-  end
-  require("review.ui.diff").refresh_markers(M.current.store)
+  M.resolve_thread(root)
 end
 
 --- Delete the thread under the cursor (with confirm).
@@ -401,7 +413,9 @@ function M.refresh()
   else arg = old.branch end
   local Source = require("review.source")
   util.notify("refreshing metadata, commits, checks, and threads…")
-  local fresh, err = Source.create(arg, old:metadata().repo_root, { base = old.base_ref })
+  local old_meta = old:metadata()
+  local refresh_base = old:kind() == "branch" and (old_meta.requested_base or "auto") or old.base_ref
+  local fresh, err = Source.create(arg, old_meta.repo_root, { base = refresh_base })
   if not fresh then
     util.notify("refresh failed: " .. tostring(err), vim.log.levels.ERROR)
     return
@@ -563,7 +577,13 @@ function M.publish_threads(threads)
     local result, err = require("review.util.gh").submit_review(
       meta.owner, meta.repo, meta.number, payload, meta.repo_root)
     if not result then util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR); return end
-    for _, root in ipairs(drafts) do M.current.store:update(root.id, { status = "published" }) end
+    for i, root in ipairs(drafts) do
+      local remote = type(result.comments) == "table" and result.comments[i] or nil
+      M.current.store:update(root.id, {
+        status = "published", origin = "github",
+        github_id = remote and (remote.node_id or tostring(remote.id)) or root.github_id,
+      })
+    end
     M.refresh()
     util.notify(string.format("published %d review comments", #drafts))
   end)
@@ -690,6 +710,7 @@ function M.setup(opts)
     group = group,
     callback = function()
       require("review.claude.runner").kill_all()
+      require("review.sidekick").kill_all()
     end,
   })
 end

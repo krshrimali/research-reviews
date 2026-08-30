@@ -22,6 +22,16 @@ describe("prompt construction", function()
     assert.is_truthy(prompt:find("human%-readable Markdown review"))
     assert.is_truthy(prompt:find("editor consumes the JSON internally", 1, true))
   end)
+
+  it("uses an exact two-revision diff for a single commit", function()
+    local source = {
+      title = function() return "commit" end, head_rev = function() return "head" end,
+      base_rev = function() return "parent" end, kind = function() return "commit" end,
+    }
+    local prompt = contract.user_prompt({ source = source, threads = {} })
+    assert.is_truthy(prompt:find("git diff --no-ext-diff --no-textconv parent head --", 1, true))
+    assert.is_nil(prompt:find("parent...head", 1, true))
+  end)
 end)
 
 describe("parse_stream_line", function()
@@ -61,7 +71,7 @@ describe("extract_findings", function()
     local text = [[Here is my review.
 
 ```json
-{"verdict":"approve","summary":"lgtm","thread_replies":[],"new_comments":[]}
+{"reviewed_head_sha":"abc","verdict":"approve","summary":"lgtm","thread_replies":[],"new_comments":[],"resolved":[],"commits":[]}
 ```]]
     local f, err = contract.extract_findings(text)
     assert.is_nil(err)
@@ -69,9 +79,16 @@ describe("extract_findings", function()
   end)
 
   it("takes the LAST json block if several", function()
-    local text = "```json\n{\"verdict\":\"comment\"}\n```\nmore\n```json\n{\"verdict\":\"request_changes\"}\n```"
+    local text = "```json\n{\"reviewed_head_sha\":\"old\",\"verdict\":\"comment\",\"summary\":\"old\"}\n```\nmore\n```json\n{\"reviewed_head_sha\":\"new\",\"verdict\":\"request_changes\",\"summary\":\"new\"}\n```"
     local f = contract.extract_findings(text)
     assert.equals("request_changes", f.verdict)
+  end)
+
+  it("rejects unsafe inline finding paths", function()
+    local text = '```json\n{"reviewed_head_sha":"abc","verdict":"comment","summary":"x","new_comments":[{"file":"../secret","line_start":1,"line_end":1,"side":"RIGHT","body":"x"}]}\n```'
+    local f, err = contract.extract_findings(text)
+    assert.is_nil(f)
+    assert.is_truthy(err:find("unsafe file", 1, true))
   end)
 
   it("errors on missing block", function()

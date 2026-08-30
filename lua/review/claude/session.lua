@@ -74,15 +74,22 @@ function M.list(store)
   map_key("x", function()
     local s = map[vim.api.nvim_win_get_cursor(0)[1]]
     if s and s.state == "running" then
-      runner.kill(s.id)
-      util.notify("killed session " .. s.id:sub(1, 8))
+      local killed = runner.kill(s.id) or require("review.sidekick").cancel(s.id)
+      if killed then util.notify("cancelled session " .. s.id:sub(1, 8)) end
     end
   end)
   map_key("R", function()
     local s = map[vim.api.nvim_win_get_cursor(0)[1]]
     if s and s.state ~= "running" then
-      local retried = runner.retry(s, store)
-      util.notify("retry started as " .. retried.id:sub(1, 8))
+      local retried, err
+      if s.backend == "sidekick" and s.retry_prompt then
+        retried, err = require("review.sidekick").run(store.source, store, s.retry_prompt, {
+          allow_edits = s.allow_edits, auto_resolve = s.auto_resolve })
+      else
+        retried, err = runner.retry(s, store)
+      end
+      if retried then util.notify("retry started as " .. retried.id:sub(1, 8))
+      else util.notify("retry failed: " .. tostring(err), vim.log.levels.ERROR) end
     end
   end)
   map_key("q", function()
@@ -172,8 +179,9 @@ function M.detail(s, store)
   end, { buffer = buf, nowait = true })
   vim.keymap.set("n", "R", function()
     if s.state == "running" then return end
-    local retried = runner.retry(s, store)
-    util.notify("retry started as " .. retried.id:sub(1, 8))
+    local retried, err = runner.retry(s, store)
+    if retried then util.notify("retry started as " .. retried.id:sub(1, 8))
+    else util.notify("retry failed: " .. tostring(err), vim.log.levels.ERROR) end
   end, { buffer = buf, desc = "retry Claude review" })
   vim.keymap.set("n", "v", function()
     if not s.cwd then return end

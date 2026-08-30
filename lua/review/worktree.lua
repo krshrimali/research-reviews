@@ -30,8 +30,9 @@ end
 ---@param repo_root string
 ---@param sha string
 ---@return string
-local function wt_path(repo_root, sha)
-  return vim.fs.joinpath(wt_root(repo_root), sha:sub(1, 12))
+local function wt_path(repo_root, sha, key)
+  local suffix = key and ("-" .. tostring(key):gsub("[^%w_.-]", "_"):sub(1, 16)) or ""
+  return vim.fs.joinpath(wt_root(repo_root), sha:sub(1, 12) .. suffix)
 end
 
 --- List existing worktrees known to git for this repo. Returns map path->{sha,branch}.
@@ -71,12 +72,16 @@ end
 ---@param repo_root string
 ---@param sha string
 ---@return string|nil path, string|nil err
-function M.ensure(repo_root, sha)
+function M.ensure(repo_root, sha, opts)
+  opts = opts or {}
   local full = git.rev_parse(sha, repo_root)
   if not full then
     return nil, "unknown commit: " .. tostring(sha)
   end
-  local path = wt_path(repo_root, full)
+  local path = wt_path(repo_root, full, opts.key)
+  local parent = vim.fn.fnamemodify(path, ":h")
+  vim.fn.mkdir(parent, "p", 448)
+  pcall(vim.uv.fs_chmod, parent, 448)
   -- Reuse if already registered at the right sha.
   local existing = M.list(repo_root)[path]
   if existing then
@@ -90,9 +95,6 @@ function M.ensure(repo_root, sha)
     end
     return path
   end
-  local parent = vim.fn.fnamemodify(path, ":h")
-  vim.fn.mkdir(parent, "p", 448) -- 0700: repository contents are never globally cached
-  pcall(vim.uv.fs_chmod, parent, 448)
   local ok, _, err = proc.git({ "worktree", "add", "--detach", path, full }, repo_root)
   if not ok then
     return nil, err

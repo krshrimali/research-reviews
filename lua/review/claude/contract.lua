@@ -76,8 +76,9 @@ function M.user_prompt(opts)
   table.insert(parts, "\n## DIFF")
   table.insert(parts, "The repository is available at the session working directory.")
   table.insert(parts, "Inspect the exact review diff with this read-only command:")
-  table.insert(parts, string.format("`git diff --no-ext-diff --no-textconv %s...%s --`",
-    src:base_rev(), src:head_rev()))
+  local separator = src.kind and src:kind() == "commit" and " " or "..."
+  table.insert(parts, string.format("`git diff --no-ext-diff --no-textconv %s%s%s --`",
+    src:base_rev(), separator, src:head_rev()))
   table.insert(parts, "Do not rely on a diff copied into this prompt; read the current repository state.")
   return table.concat(parts, "\n")
 end
@@ -87,7 +88,13 @@ end
 ---@return string
 function M.build_diff(source)
   local meta = source:metadata()
-  local ok, out = proc.git({ "diff", source:base_rev() .. "..." .. source:head_rev() }, meta.repo_root)
+  local range = source:kind() == "commit"
+      and { source:base_rev(), source:head_rev() }
+      or { source:base_rev() .. "..." .. source:head_rev() }
+  local args = { "diff", "--no-ext-diff", "--no-textconv" }
+  vim.list_extend(args, range)
+  table.insert(args, "--")
+  local ok, out = proc.git(args, meta.repo_root)
   return ok and out or ""
 end
 
@@ -145,6 +152,35 @@ function M.extract_findings(text)
   local ok, decoded = pcall(vim.json.decode, last)
   if not ok or type(decoded) ~= "table" then
     return nil, "findings json decode failed"
+  end
+  if type(decoded.reviewed_head_sha) ~= "string" or decoded.reviewed_head_sha == "" then
+    return nil, "reviewed_head_sha is required"
+  end
+  if not vim.tbl_contains({ "approve", "request_changes", "comment" }, decoded.verdict) then
+    return nil, "invalid verdict"
+  end
+  if type(decoded.summary) ~= "string" then return nil, "summary must be a string" end
+  for _, field in ipairs({ "thread_replies", "new_comments", "resolved", "commits" }) do
+    if decoded[field] == nil then decoded[field] = {} end
+    if not vim.islist(decoded[field]) then return nil, field .. " must be an array" end
+  end
+  for i, reply in ipairs(decoded.thread_replies) do
+    if type(reply) ~= "table" or type(reply.comment_id) ~= "string" or type(reply.reply) ~= "string" then
+      return nil, "invalid thread_replies[" .. i .. "]"
+    end
+  end
+  for i, comment in ipairs(decoded.new_comments) do
+    local file = type(comment) == "table" and comment.file or nil
+    if type(file) ~= "string" or file == "" or file:sub(1, 1) == "/"
+        or file:match("^%.%./") or file:match("/%.%./") then
+      return nil, "unsafe file in new_comments[" .. i .. "]"
+    end
+    if type(comment.line_start) ~= "number" or comment.line_start < 1
+        or type(comment.line_end) ~= "number" or comment.line_end < comment.line_start
+        or not vim.tbl_contains({ "LEFT", "RIGHT" }, comment.side)
+        or type(comment.body) ~= "string" then
+      return nil, "invalid new_comments[" .. i .. "]"
+    end
   end
   return decoded, nil
 end

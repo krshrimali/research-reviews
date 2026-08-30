@@ -72,7 +72,11 @@ local function apply_findings(store, source, session, findings)
 
   -- New Claude-authored comments.
   for _, nc in ipairs(findings.new_comments or {}) do
-    local c = store:add({
+    if drifted then
+      table.insert(session.findings, { general = true, note = string.format(
+        "Outdated inline finding at %s:%s: %s", nc.file, nc.line_start, nc.body) })
+    else
+      local c = store:add({
       file = nc.file,
       side = nc.side or "RIGHT",
       line_start = nc.line_start or 1,
@@ -82,14 +86,25 @@ local function apply_findings(store, source, session, findings)
       suggestion_text = nc.suggestion,
       origin = "claude",
     })
-    table.insert(session.findings, { comment_id = c.id, file = nc.file, line = nc.line_start })
+      table.insert(session.findings, { comment_id = c.id, file = nc.file, line = nc.line_start })
+    end
   end
 
   -- Auto-resolve (only honored if the run enabled it).
   if session.auto_resolve then
     for _, id in ipairs(findings.resolved or {}) do
-      if store:get(id) then
+      local root = store:get(id)
+      if root then
         store:set_resolved(id, true)
+        if root.github_thread_id and source:kind() == "pr" then
+          local ok, err = require("review.util.gh").resolve_thread(root.github_thread_id, true,
+            source:metadata().repo_root)
+          if not ok then
+            store:set_resolved(id, false)
+            table.insert(session.findings, { general = true,
+              note = "Could not resolve GitHub thread " .. id .. ": " .. tostring(err) })
+          end
+        end
       end
     end
   end
@@ -125,6 +140,8 @@ function M.start(opts)
       end
     end
   end
+  roots = vim.deepcopy(roots)
+  for _, root in ipairs(roots) do root.replies = vim.deepcopy(store:replies(root.id)) end
 
   local diff = contract.build_diff(source)
   local user_prompt = contract.user_prompt({
@@ -140,11 +157,13 @@ function M.start(opts)
   local meta = source:metadata()
   local cwd = meta.repo_root
   if opts.allow_edits then
-    local wt, err = worktree.ensure(meta.repo_root, source:head_rev())
+    local wt, err = worktree.ensure(meta.repo_root, source:head_rev(), { key = session_id })
     if wt then
       cwd = wt
     else
-      util.notify("could not create edit worktree: " .. tostring(err), vim.log.levels.WARN)
+      local message = "could not create isolated edit worktree: " .. tostring(err)
+      util.notify(message, vim.log.levels.ERROR)
+      return nil, message
     end
   end
 

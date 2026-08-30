@@ -88,7 +88,7 @@ describe("claude runner (fake claude)", function()
         return { turns = {
           { prompt = "review head " .. source:head_rev(), blocks = {
             { kind = "text", text = "Readable review.\n```json\n{\"reviewed_head_sha\":\""
-              .. source:head_rev() .. "\",\"new_comments\":[]}\n```" },
+              .. source:head_rev() .. "\",\"verdict\":\"comment\",\"summary\":\"ok\",\"new_comments\":[]}\n```" },
           } },
         } }
       end,
@@ -96,6 +96,18 @@ describe("claude runner (fake claude)", function()
     assert.is_truthy(result:find("Readable review", 1, true))
     local findings = require("review.claude.contract").extract_findings(result)
     assert.equals(source:head_rev(), findings.reviewed_head_sha)
+  end)
+
+  it("ignores transcript turns from before the current run", function()
+    local fake = {
+      sessions = function() return { {} } end,
+      build = function() return { turns = {
+        { ts = 10, prompt = source:head_rev(), blocks = { { kind = "text", text = "old" } } },
+        { ts = 30, prompt = source:head_rev(), blocks = { { kind = "text", text = "new" } } },
+      } } end,
+    }
+    assert.equals("new", require("review.sidekick").transcript_result(source, dir, fake, { not_before = 20 }))
+    assert.is_nil(require("review.sidekick").transcript_result(source, dir, fake, { not_before = 40 }))
   end)
 
   it("includes native Diffview comments in whole-review prompts", function()
@@ -125,5 +137,18 @@ describe("claude runner (fake claude)", function()
     assert.is_nil(runner.jobs[session.id])
     local reloaded = require("review.comments.store").for_source(source)
     assert.equals("cancelled", reloaded.sessions[session.id].state)
+  end)
+
+  it("fails closed when an edit worktree cannot be created", function()
+    local wt = require("review.worktree")
+    local original = wt.ensure
+    wt.ensure = function() return nil, "denied" end
+    local session, err = require("review.claude.runner").start({
+      store = store, source = source, allow_edits = true,
+    })
+    wt.ensure = original
+    assert.is_nil(session)
+    assert.is_truthy(err:find("isolated edit worktree", 1, true))
+    assert.equals(0, vim.tbl_count(require("review.claude.runner").jobs))
   end)
 end)

@@ -8,7 +8,7 @@ local M = {}
 --- True if the gh CLI is available.
 ---@return boolean
 function M.available()
-  return (proc.run({ vim.env.PRTUI_GH_BIN or "gh", "--version" }))
+  return vim.fn.executable(vim.env.PRTUI_GH_BIN or "gh") == 1
 end
 
 --- Run a GraphQL query. `vars` is a map of name->string (gh -F/-f). Returns decoded

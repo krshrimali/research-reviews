@@ -471,8 +471,13 @@ local function present_snacks_loading(cwd, opts, on_choose, snacks)
           cmd = gh_bin,
           args = gh.list_prs_args(opts), cwd = cwd, raw = true,
         }, ctx)(function(row) chunks[#chunks + 1] = row.text end)
-        local decoded = vim.json.decode(table.concat(chunks))
-        assert(vim.islist(decoded), "gh pr list did not return a JSON array")
+        local ok_decode, decoded = pcall(vim.json.decode, table.concat(chunks))
+        if not ok_decode or not vim.islist(decoded) then
+          ctx.async:schedule(function()
+            util.notify("GitHub PR loading failed; press r to retry", vim.log.levels.ERROR)
+          end)
+          return
+        end
         local rendered = ctx.async:schedule(function()
           for _, pr in ipairs(decoded) do collected[#collected + 1] = pr end
           cache_store(key, collected)

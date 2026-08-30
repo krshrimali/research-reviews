@@ -9,6 +9,7 @@ local util = require("review.util")
 ---@field repo_root string
 ---@field branch string
 ---@field base_ref string
+---@field requested_base string
 ---@field _base_sha string
 ---@field _head_sha string
 local LocalBranch = {}
@@ -52,6 +53,7 @@ function LocalBranch.new(cwd, opts)
     repo_root = root,
     branch = branch,
     base_ref = base_ref,
+    requested_base = opts.base or "auto",
     _base_sha = base_sha,
     _head_sha = head_sha,
   }, LocalBranch)
@@ -135,6 +137,7 @@ function LocalBranch:metadata()
   return {
     branch = self.branch,
     base_ref = self.base_ref,
+    requested_base = self.requested_base,
     base_sha = self._base_sha,
     head_sha = self._head_sha,
     repo_root = self.repo_root,

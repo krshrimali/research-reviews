@@ -65,10 +65,16 @@ end
 ---@return string
 function M.truncate(s, n)
   s = (s or ""):gsub("[\r\n]+", " ")
-  if vim.fn.strchars(s) <= n then
-    return s
+  if n <= 0 then return "" end
+  local offsets, i = {}, 1
+  while i <= #s do
+    offsets[#offsets + 1] = i
+    local byte = s:byte(i)
+    i = i + (byte < 0x80 and 1 or byte < 0xE0 and 2 or byte < 0xF0 and 3 or 4)
   end
-  return vim.fn.strcharpart(s, 0, math.max(0, n - 1)) .. "…"
+  if #offsets <= n then return s end
+  if n == 1 then return "…" end
+  return s:sub(1, offsets[n] - 1) .. "…"
 end
 
 --- ISO-8601 -> "2h ago" style relative time. Falls back to the raw string.

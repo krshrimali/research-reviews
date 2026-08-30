@@ -12,7 +12,8 @@ M.pollers = {}
 ---@param cwd string
 ---@param model table|nil injectable transcript model for tests
 ---@return string|nil
-function M.transcript_result(source, cwd, model)
+function M.transcript_result(source, cwd, model, opts)
+  opts = opts or {}
   local ok
   if not model then
     ok, model = pcall(require, "sidekick.review.model")
@@ -26,7 +27,8 @@ function M.transcript_result(source, cwd, model)
     if ok_build and transcript then
       for i = #(transcript.turns or {}), 1, -1 do
         local turn = transcript.turns[i]
-        if type(turn.prompt) == "string" and turn.prompt:find(head, 1, true) then
+        if (not opts.not_before or (tonumber(turn.ts) or 0) >= opts.not_before)
+            and type(turn.prompt) == "string" and turn.prompt:find(head, 1, true) then
           local text = {}
           for _, block in ipairs(turn.blocks or {}) do
             if block.kind == "text" and type(block.text) == "string" then
@@ -105,9 +107,10 @@ function M.run(source, store, prompt, opts)
   end
   local meta = source:metadata()
   local cwd = meta.repo_root
+  local id = util.uuid()
   if opts.allow_edits then
     local err
-    cwd, err = worktree.ensure(meta.repo_root, source:head_rev())
+    cwd, err = worktree.ensure(meta.repo_root, source:head_rev(), { key = id })
     if not cwd then
       return nil, err
     end
@@ -116,13 +119,13 @@ function M.run(source, store, prompt, opts)
   if not state or not state.session then
     return nil, "could not start Sidekick session"
   end
-  local id = util.uuid()
   local session = {
     id = id, source_key = source:key(), state = "running", progress = "Starting agent",
     started_at = os.date("!%Y-%m-%dT%H:%M:%SZ"), cwd = cwd,
     allow_edits = opts.allow_edits or false, auto_resolve = opts.auto_resolve or false,
     replied = {}, findings = {}, log = {}, applied = false,
-    sidekick_id = state.session.id,
+    sidekick_id = state.session.id, backend = "sidekick", retry_prompt = prompt,
+    started_epoch = os.time(),
   }
   store.sessions[id] = session
   store:save()
@@ -133,6 +136,10 @@ function M.run(source, store, prompt, opts)
       state.session:submit()
     end)
     if not sent then
+      session.state, session.progress = "error", "Could not send prompt to Sidekick"
+      session.error, session.ended_at = tostring(err), os.date("!%Y-%m-%dT%H:%M:%SZ")
+      store.sessions[id] = session; store:save(); M.pollers[id] = nil
+      if opts.on_done then opts.on_done(session) end
       util.notify("Sidekick send failed: " .. tostring(err), vim.log.levels.ERROR)
     end
   end)
@@ -142,7 +149,7 @@ function M.run(source, store, prompt, opts)
   local ticks, last_progress = 0, session.progress
   local function tick()
     ticks = ticks + 1
-    if session.state ~= "running" then return end
+    if session.state ~= "running" or not M.pollers[id] then return end
     local terminal = state.terminal
     local buf = terminal and terminal.buf
     local lines, text = {}, ""
@@ -150,7 +157,7 @@ function M.run(source, store, prompt, opts)
       lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
       text = table.concat(lines, "\n")
     end
-    local exact = M.transcript_result(source, cwd)
+    local exact = M.transcript_result(source, cwd, nil, { not_before = session.started_epoch - 2 })
     local findings = require("review.claude.contract").extract_findings(exact or text)
     if findings and findings.reviewed_head_sha then
       M.apply_findings(store, source, session, findings)
@@ -191,12 +198,36 @@ function M.run(source, store, prompt, opts)
         .. session.error .. " · open Review Sessions for the full response", vim.log.levels.ERROR)
       return
     end
+    local timeout = require("review.config").get().claude.timeout_ms or 0
+    if timeout > 0 and (os.time() - session.started_epoch) * 1000 >= timeout then
+      session.state, session.progress = "timed_out", "Review timed out"
+      session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+      store.sessions[id] = session; store:save(); M.pollers[id] = nil
+      if opts.on_done then opts.on_done(session) end
+      util.notify("Sidekick review timed out; the interactive terminal was left open", vim.log.levels.WARN)
+      return
+    end
     if ticks % 3 == 0 then store.sessions[id] = session; store:save() end
     vim.defer_fn(tick, 1500)
   end
-  M.pollers[id] = true
+  M.pollers[id] = { session = session, store = store }
   vim.defer_fn(tick, 1000)
   return session
+end
+
+function M.cancel(id, state)
+  local live = M.pollers[id]
+  if not live then return false end
+  live.session.state = state or "cancelled"
+  live.session.ended_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
+  live.store.sessions[id] = live.session
+  live.store:save()
+  M.pollers[id] = nil
+  return true
+end
+
+function M.kill_all()
+  for _, id in ipairs(vim.tbl_keys(M.pollers)) do M.cancel(id) end
 end
 
 function M.toggle()

@@ -137,7 +137,7 @@ local function build(store, file, filter, query, selected)
   end
   table.insert(lines, "")
   table.insert(lines, "<CR> open · Space select · a ask Claude · p publish · I import")
-  table.insert(lines, "f filter · / search · Q quickfix · r resolve · e edit · d delete · y copy · q close")
+  table.insert(lines, "f filter · / search · Q quickfix · R reply · r resolve · e edit · d delete · y copy · q close")
   return lines, map
 end
 
@@ -200,9 +200,12 @@ function M.open(store, file, side, on_jump)
   map("r", function()
     local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
     if root then
-      state.store:set_resolved(root.id, root.status ~= "resolved")
-      M.render(state.store, state.file, state.side)
+      require("review").resolve_thread(root, function() M.refresh() end)
     end
+  end)
+  map("R", function()
+    local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
+    if root then require("review").reply_thread(root, function() M.refresh() end) end
   end)
   map("<Space>", function()
     local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
@@ -243,7 +246,7 @@ function M.open(store, file, side, on_jump)
   end)
   map("d", function()
     local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if root then
+    if root and vim.fn.confirm("Delete this local thread?", "&Delete\n&Cancel", 2) == 1 then
       state.store:delete(root.id)
       M.render(state.store, state.file, state.side)
     end
@@ -251,6 +254,10 @@ function M.open(store, file, side, on_jump)
   map("e", function()
     local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
     if root then
+      if root.github_id then
+        util.notify("Published GitHub comments cannot be edited locally", vim.log.levels.WARN)
+        return
+      end
       require("review.ui.compose").open({ title = "Edit thread", initial = root.body, on_submit = function(body)
         state.store:update(root.id, { body = body }); M.render(state.store, state.file, state.side)
       end })
@@ -268,6 +275,10 @@ function M.open(store, file, side, on_jump)
   map("q", M.close)
 
   M.render(store, file, side)
+end
+
+function M.refresh()
+  if state then M.render(state.store, state.file, state.side) end
 end
 
 --- Close the panel.

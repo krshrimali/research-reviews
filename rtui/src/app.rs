@@ -2780,7 +2780,10 @@ impl App {
     }
 
     fn publish_key(&mut self, key: KeyEvent) {
-        let action = self.publish.as_mut().unwrap().on_key(key);
+        let Some(view) = self.publish.as_mut() else {
+            return;
+        };
+        let action = view.on_key(key);
         match action {
             crate::publish::PublishAction::None => {}
             crate::publish::PublishAction::Cancel => {
@@ -2797,7 +2800,10 @@ impl App {
             self.publish = None;
             return;
         };
-        let view = self.publish.as_ref().unwrap();
+        let Some(view) = self.publish.as_ref() else {
+            self.status = "publish view is no longer open".into();
+            return;
+        };
         let included = view.included();
         let payload = crate::publish::build_payload(
             &self.source.head_sha,
@@ -2815,10 +2821,29 @@ impl App {
             &payload_str,
             Some(&self.source.repo_root),
         ) {
-            Ok(_) => {
-                for id in &root_ids {
+            Ok(response) => {
+                for (index, id) in root_ids.iter().enumerate() {
                     self.store.mark_published(id);
+                    if let Some(node_id) = response
+                        .get("comments")
+                        .and_then(|v| v.as_array())
+                        .and_then(|comments| comments.get(index))
+                        .and_then(|comment| {
+                            comment
+                                .get("node_id")
+                                .and_then(|v| v.as_str())
+                                .map(str::to_owned)
+                                .or_else(|| comment.get("id").map(ToString::to_string))
+                        })
+                    {
+                        let root = self.store.root_of(id);
+                        if let Some(comment) = self.store.comments.get_mut(&root) {
+                            comment.github_id = Some(node_id.trim_matches('"').to_owned());
+                            comment.origin = "github".into();
+                        }
+                    }
                 }
+                self.store.save();
                 let verdict = view.verdict.event();
                 self.publish = None;
                 self.load_diff();
@@ -2858,7 +2883,10 @@ impl App {
         let mut edit_prompt: Option<String> = None;
         let mut edit_prompt_form: Option<ClaudeForm> = None;
         let mut run_prompt: Option<(ClaudeForm, String)> = None;
-        match self.modal.as_mut().unwrap() {
+        let Some(modal) = self.modal.as_mut() else {
+            return;
+        };
+        match modal {
             Modal::Compose(c) => match key.code {
                 KeyCode::Esc => {
                     self.modal = None;
