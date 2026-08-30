@@ -30,11 +30,21 @@ function M.graphql(query, vars, cwd)
   end
   local ok, out, err = proc.run(argv, { cwd = cwd })
   if not ok then
-    return nil, err
+    return nil, M.error_message(out, err)
   end
   local decoded_ok, decoded = pcall(vim.json.decode, out)
   if not decoded_ok then
     return nil, "gh graphql: bad JSON"
+  end
+  -- GraphQL reports failures with HTTP 200 and an `errors` array, so a successful
+  -- exit code says nothing about whether the mutation actually happened.
+  if type(decoded.errors) == "table" and #decoded.errors > 0 then
+    local messages = {}
+    for _, entry in ipairs(decoded.errors) do
+      messages[#messages + 1] = type(entry) == "table" and (entry.message or vim.inspect(entry))
+        or tostring(entry)
+    end
+    return nil, table.concat(messages, "; ")
   end
   return decoded.data, nil
 end
@@ -103,7 +113,7 @@ end
 ---@param cwd string|nil
 ---@return table|nil pr, string|nil err
 function M.pr_view(number, cwd)
-  local fields = "number,title,body,author,state,isDraft,updatedAt,createdAt,"
+  local fields = "id,number,title,body,author,state,isDraft,updatedAt,createdAt,"
     .. "headRefName,baseRefName,headRefOid,baseRefOid,labels,assignees,"
     .. "headRepository,headRepositoryOwner,isCrossRepository,reviewRequests,reviews,"
     .. "reviewDecision,statusCheckRollup,commits,files,mergeable,comments"
@@ -179,13 +189,153 @@ function M.resolve_thread(thread_id, resolved, cwd)
   return data ~= nil, err
 end
 
+--- Pull the human-readable reason out of a GitHub error response.
+---
+--- `gh` prints the status line to stderr ("Unprocessable Entity (HTTP 422)") and the
+--- body — which is where GitHub explains *why* — to stdout. Reporting only stderr
+--- turned "Can not request changes on your own pull request" into a bare 422.
+---@param body string
+---@param fallback string
+---@return string
+function M.error_message(body, fallback)
+  local ok, decoded = pcall(vim.json.decode, body or "")
+  if not ok or type(decoded) ~= "table" then
+    return vim.trim(fallback or "") ~= "" and vim.trim(fallback) or "GitHub rejected the request"
+  end
+  local parts = {}
+  for _, entry in ipairs(decoded.errors or {}) do
+    if type(entry) == "string" then
+      parts[#parts + 1] = entry
+    elseif type(entry) == "table" then
+      parts[#parts + 1] = entry.message or entry.field or vim.inspect(entry)
+    end
+  end
+  if #parts > 0 then
+    return table.concat(parts, "; ")
+  end
+  if type(decoded.message) == "string" then
+    return decoded.message
+  end
+  return vim.trim(fallback or "")
+end
+
 function M.submit_review(owner, repo, number, payload, cwd)
   local path = string.format("repos/%s/%s/pulls/%d/reviews", owner, repo, number)
   local ok, out, err = proc.run({ vim.env.PRTUI_GH_BIN or "gh", "api", path,
     "--method", "POST", "--input", "-" }, { cwd = cwd, stdin = vim.json.encode(payload) })
-  if not ok then return nil, err end
+  if not ok then return nil, M.error_message(out, err) end
   local decoded, value = pcall(vim.json.decode, out)
   return decoded and value or nil, decoded and nil or "bad GitHub response"
+end
+
+--- The login of the authenticated user, cached for the session.
+---@param cwd string|nil
+---@return string|nil
+function M.viewer(cwd)
+  if M._viewer ~= nil then
+    return M._viewer ~= false and M._viewer or nil
+  end
+  local ok, out = proc.run({ vim.env.PRTUI_GH_BIN or "gh", "api", "user", "-q", ".login" }, { cwd = cwd })
+  M._viewer = ok and vim.trim(out) ~= "" and vim.trim(out) or false
+  return M._viewer ~= false and M._viewer or nil
+end
+
+--- Every inline review comment on a PR, across pages.
+---@param owner string
+---@param repo string
+---@param number integer
+---@param cwd string|nil
+---@return table[] comments, string|nil err
+function M.list_review_comments(owner, repo, number, cwd)
+  local path = string.format("repos/%s/%s/pulls/%d/comments", owner, repo, number)
+  local ok, out, err = proc.run({ vim.env.PRTUI_GH_BIN or "gh", "api", "--paginate", path },
+    { cwd = cwd })
+  if not ok then return {}, M.error_message(out, err) end
+  local decoded_ok, decoded = pcall(vim.json.decode, out)
+  if not decoded_ok or not vim.islist(decoded) then
+    return {}, "gh: unexpected review-comment response"
+  end
+  return decoded, nil
+end
+
+--- True when the message describes GitHub throttling rather than a real rejection.
+---@param message string|nil
+---@return boolean
+function M.is_rate_limited(message)
+  message = tostring(message or ""):lower()
+  return message:find("secondary rate limit", 1, true) ~= nil
+    or message:find("api rate limit exceeded", 1, true) ~= nil
+    or message:find("abuse detection", 1, true) ~= nil
+end
+
+-- A single REST review carrying dozens of comments is rejected by GitHub with an
+-- opaque 500. The GraphQL flow below builds the same review incrementally — start a
+-- PENDING review, add one thread at a time, then submit — which is what GitHub's own
+-- web UI does and what large reviews therefore have to use.
+
+--- Start a pending (unsubmitted) review. Returns its node id.
+---@param pr_id string  PR node id
+---@param cwd string|nil
+---@return string|nil id, string|nil err
+function M.start_pending_review(pr_id, cwd)
+  local q = [[mutation($pr:ID!){addPullRequestReview(input:{pullRequestId:$pr}){pullRequestReview{id}}}]]
+  local data, err = M.graphql(q, { pr = pr_id }, cwd)
+  if not data then return nil, err end
+  local ok, id = pcall(function() return data.addPullRequestReview.pullRequestReview.id end)
+  return ok and id or nil, ok and nil or "unexpected pending-review response"
+end
+
+--- Add one inline thread to a pending review.
+---@param review_id string
+---@param comment table { path, body, line, start_line?, side }
+---@param cwd string|nil
+---@return boolean ok, string|nil err
+function M.add_pending_thread(review_id, comment, cwd)
+  local vars = {
+    review = review_id,
+    path = comment.path,
+    body = comment.body,
+    line = comment.line,
+    side = comment.side or "RIGHT",
+  }
+  local decl = "$review:ID!,$path:String!,$body:String!,$line:Int!,$side:DiffSide!"
+  local args = "pullRequestReviewId:$review,path:$path,body:$body,line:$line,side:$side"
+  if comment.start_line and comment.start_line < comment.line then
+    vars.start_line = comment.start_line
+    decl = decl .. ",$start_line:Int!"
+    args = args .. ",startLine:$start_line,startSide:$side"
+  end
+  local q = string.format(
+    "mutation(%s){addPullRequestReviewThread(input:{%s}){thread{id}}}", decl, args)
+  local data, err = M.graphql(q, vars, cwd)
+  return data ~= nil, err
+end
+
+--- Submit a pending review with a verdict and body.
+---@param review_id string
+---@param event string  COMMENT|APPROVE|REQUEST_CHANGES
+---@param body string
+---@param cwd string|nil
+---@return boolean ok, string|nil err
+function M.submit_pending_review(review_id, event, body, cwd)
+  local q = [[mutation($review:ID!,$event:PullRequestReviewEvent!,$body:String!){
+    submitPullRequestReview(input:{pullRequestReviewId:$review,event:$event,body:$body}){
+      pullRequestReview{ id state }
+    }
+  }]]
+  local data, err = M.graphql(q, { review = review_id, event = event, body = body }, cwd)
+  return data ~= nil, err
+end
+
+--- Throw away a pending review that could not be completed, so a failed publish does
+--- not strand an invisible draft review on the PR.
+---@param review_id string
+---@param cwd string|nil
+---@return boolean
+function M.discard_pending_review(review_id, cwd)
+  local q = [[mutation($review:ID!){deletePullRequestReview(input:{pullRequestReviewId:$review}){clientMutationId}}]]
+  local data = M.graphql(q, { review = review_id }, cwd)
+  return data ~= nil
 end
 
 function M.react(subject_id, content, add, cwd)

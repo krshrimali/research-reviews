@@ -63,6 +63,8 @@ vim.api.nvim_create_user_command("ReviewSync", function() later(function(r) r.sy
   { desc = "Import the latest Claude findings from its transcript" })
 vim.api.nvim_create_user_command("ReviewQuickfix", function() review().threads_to_quickfix() end,
   { desc = "Export review threads to quickfix" })
+vim.api.nvim_create_user_command("ReviewDedupe", function() later(function(r) r.dedupe_threads() end) end,
+  { desc = "Merge threads that point at the same GitHub comment" })
 vim.api.nvim_create_user_command("ReviewPublish", function() review().publish_threads() end,
   { desc = "Preview and submit a GitHub review (verdict, summary, drafts)" })
 

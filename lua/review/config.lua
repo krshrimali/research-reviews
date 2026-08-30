@@ -19,8 +19,21 @@ M.defaults = {
   picker_cache_ttl = 30, -- seconds; explicit refresh bypasses the cache
   commit_picker_limit = 200,
 
+  -- Above this many inline comments, a review is built one thread at a time through
+  -- GraphQL instead of one REST call: GitHub rejects a large single-request review
+  -- with an opaque 500.
+  publish_batch_limit = 20,
+
   -- Number of context lines kept visible around a hunk when folded.
   fold_context = 3,
+
+  -- Who draws a thread INSIDE the diff. review.nvim bridges its GitHub threads into
+  -- Diffview, so with both drawing them every upstream comment appeared twice on the
+  -- same line — once as Diffview's `REVIEW #n` block and once as ours.
+  --   "auto"     let Diffview render the threads it was given; we render the rest
+  --   "review"   review.nvim renders every thread (use when the bridge is off)
+  --   "diffview" render nothing inline; the panel remains the review surface
+  inline_owner = "auto",
 
   workspace = {
     dedicated_tab = true,

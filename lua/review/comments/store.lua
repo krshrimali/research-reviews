@@ -297,6 +297,42 @@ function Store:get(id)
   return self.comments[id]
 end
 
+--- Collapse threads that point at the same upstream comment.
+---
+--- A publish that GitHub reported as failed but actually applied could leave a local
+--- draft and an imported copy of the same comment side by side. The imported record
+--- is authoritative — it carries the real author, timestamps and replies — so the
+--- other one is dropped.
+---@return integer removed
+function Store:dedupe_github()
+  local by_gid = {}
+  for _, comment in pairs(self.comments) do
+    if comment.github_id and not comment.in_reply_to then
+      local bucket = by_gid[comment.github_id] or {}
+      bucket[#bucket + 1] = comment
+      by_gid[comment.github_id] = bucket
+    end
+  end
+  local removed = 0
+  for _, bucket in pairs(by_gid) do
+    if #bucket > 1 then
+      table.sort(bucket, function(a, b)
+        -- Prefer the record the importer created: it has upstream provenance.
+        local a_import = a.origin == "github" and a.github_thread_id ~= nil
+        local b_import = b.origin == "github" and b.github_thread_id ~= nil
+        if a_import ~= b_import then return a_import end
+        return (a.created_at or "") < (b.created_at or "")
+      end)
+      for index = 2, #bucket do
+        self:delete(bucket[index].id)
+        removed = removed + 1
+      end
+    end
+  end
+  if removed > 0 then self:save() end
+  return removed
+end
+
 --- Re-anchor every comment against current file content, applying rename map.
 --- Marks comments "outdated" when their anchor can't be uniquely relocated.
 ---@param rename_map table<string,string>|nil  old_path -> new_path

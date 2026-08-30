@@ -42,7 +42,14 @@ local function sync_diffview_github_comments(current, attempts)
     return
   end
   if ok_review and review.import_threads then
-    review.import_threads(view, diffview_github_threads(current.store), "github")
+    local threads = diffview_github_threads(current.store)
+    local ok_import = pcall(review.import_threads, view, threads, "github")
+    -- Remember whether Diffview took ownership of these, so markers.render can skip
+    -- drawing a second copy of every one of them on the same line.
+    M.diffview_renders_github = ok_import and #threads > 0
+    if ok_import then
+      require("review.ui.diff").refresh_markers(current.store)
+    end
   end
 end
 
@@ -170,17 +177,20 @@ end
 --- caller just navigated to. Diffview's own jump leaves the cursor in the LEFT pane
 --- regardless of the requested side.
 ---@param side string|nil "LEFT"|"RIGHT"
-local function focus_side(side)
+---@param file string|nil  only focus once this file is the one on screen
+---@return boolean focused
+local function focus_side(side, file)
   local ok, diff = pcall(require, "review.ui.diff")
-  if not ok then return end
+  if not ok then return false end
   local want = side == "LEFT" and "LEFT" or "RIGHT"
   for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
     local ctx = diff.buffer_context(vim.api.nvim_win_get_buf(win))
-    if ctx and ctx.side == want then
+    if ctx and ctx.side == want and (not file or ctx.file == file) then
       vim.api.nvim_set_current_win(win)
-      return
+      return true
     end
   end
+  return false
 end
 
 M._focus_side = focus_side
@@ -191,11 +201,36 @@ function M.jump_to_thread(root)
   if not root then return end
   local ok, dv = pcall(require, "diffview")
   if not ok or not dv.open_review_location then return end
-  dv.open_review_location({ path = root.file, side = root.side, line = root.line_start })
-  vim.schedule(function()
-    focus_side(root.side)
-    if M.current then require("review.ui.diff").refresh_markers(M.current.store) end
-  end)
+  -- Diffview's own jump can throw (an out-of-range cursor on the empty side of an
+  -- added file, for one). Unguarded, that surfaces as a blocking hit-enter prompt
+  -- and the navigation is simply lost; we place the cursor ourselves below anyway.
+  local jumped, jump_err = pcall(dv.open_review_location,
+    { path = root.file, side = root.side, line = root.line_start })
+  if not jumped then
+    require("review.perf").record("jump", "open_review_location", 0, false)
+    vim.notify("diffview could not jump there; falling back: " .. tostring(jump_err),
+      vim.log.levels.DEBUG)
+  end
+  -- Diffview swaps the entry's buffers asynchronously, so the window that will hold
+  -- this thread may not exist yet. Retry briefly rather than focusing whatever pane
+  -- happens to be current on the first tick.
+  local function settle(attempt)
+    if not M.current then return end
+    if focus_side(root.side, root.file) then
+      require("review.ui.diff").refresh_markers(M.current.store)
+      -- Put the cursor on the thread's own line in that pane.
+      local ctx = require("review.ui.diff").context()
+      if ctx and root.line_start then
+        local count = vim.api.nvim_buf_line_count(0)
+        pcall(vim.api.nvim_win_set_cursor, 0, { math.min(root.line_start, count), 0 })
+      end
+      return
+    end
+    if attempt < 12 then
+      vim.defer_fn(function() settle(attempt + 1) end, 40)
+    end
+  end
+  vim.schedule(function() settle(1) end)
 end
 
 --- Reply to the thread under the cursor.
@@ -584,7 +619,7 @@ function M.open_with_base(arg)
   table.sort(refs)
   vim.list_extend(choices, refs)
   table.insert(choices, 2, "Enter a ref…")
-  vim.ui.select(choices, { prompt = "Diff against which base?" }, function(choice)
+  util.select(choices, { prompt = "Diff against which base?" }, function(choice)
     if not choice then return end
     if choice == "Enter a ref…" then
       vim.ui.input({ prompt = "Base ref: " }, function(value)
@@ -659,6 +694,16 @@ function M.refresh()
       new_threads >= 0 and "+" or "", new_threads, math.abs(new_threads) == 1 and "" or "s",
       (vim.uv.hrtime() - started) / 1e9))
   end, 20)
+end
+
+--- Repair a store that holds two local records for one upstream comment.
+function M.dedupe_threads()
+  if not M.current then util.notify("open a review first", vim.log.levels.WARN); return end
+  local removed = M.current.store:dedupe_github()
+  M.notify_change()
+  util.notify(removed > 0
+    and string.format("merged %d duplicate thread%s", removed, removed == 1 and "" or "s")
+    or "no duplicate threads found")
 end
 
 function M.import_github_comments()
@@ -822,43 +867,148 @@ function M.publish_threads(threads)
     comments[#comments + 1] = comment
   end
   local src, meta = M.current.source, M.current.source:metadata()
+  local gh = require("review.util.gh")
+  local self_review = gh.viewer(meta.repo_root) == src:author()
   local payload = {
     commit_id = src:head_rev(),
     event = review.event or "COMMENT",
     body = review.body or "",
     comments = comments,
+    self_review = self_review,
   }
+  --- Attach remote ids back to the local drafts by LOCATION, never by array index:
+  --- GitHub does not promise the response preserves request order.
+  ---@param current table
+  ---@param remotes table[]
+  ---@return integer matched
+  local function attach_ids(current, remotes)
+    local buckets = {}
+    for _, remote in ipairs(remotes or {}) do
+      local key = string.format("%s:%s:%s", remote.path or "",
+        tostring(remote.line or remote.original_line or ""), remote.side or "RIGHT")
+      buckets[key] = buckets[key] or {}
+      table.insert(buckets[key], remote)
+    end
+    local matched = 0
+    for _, root in ipairs(drafts) do
+      local key = string.format("%s:%s:%s", root.file,
+        tostring(root.line_end or root.line_start), root.side or "RIGHT")
+      local bucket = buckets[key]
+      local remote = bucket and table.remove(bucket, 1) or nil
+      if remote then matched = matched + 1 end
+      current.store:update(root.id, {
+        status = "published", origin = "github",
+        github_id = remote and (remote.node_id or tostring(remote.id)) or root.github_id,
+      })
+    end
+    return matched
+  end
+
+  --- Build the review one thread at a time through GraphQL. A single REST call
+  --- carrying dozens of comments is rejected with an opaque 500, so anything past a
+  --- handful goes through the same pending-review flow GitHub's own UI uses.
+  ---@param current table
+  ---@param started integer
+  local function publish_incrementally(current, started)
+    local gh_api = require("review.util.gh")
+    local pr_id = src._pr and src._pr.id
+    if not pr_id then
+      util.notify("this PR has no node id; refresh the review and try again", vim.log.levels.ERROR)
+      return
+    end
+    local review_id, err = gh_api.start_pending_review(pr_id, meta.repo_root)
+    if not review_id then
+      util.notify("could not start the review: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    local index, failed = 0, {}
+    local function finish()
+      if #failed == #comments then
+        gh_api.discard_pending_review(review_id, meta.repo_root)
+        util.notify("no comments could be added; the pending review was discarded",
+          vim.log.levels.ERROR)
+        return
+      end
+      local ok, submit_err = gh_api.submit_pending_review(review_id, payload.event, payload.body,
+        meta.repo_root)
+      if not ok then
+        util.notify(("review left pending on GitHub: %s"):format(tostring(submit_err)),
+          vim.log.levels.ERROR)
+        return
+      end
+      current.store:set_review_draft({ event = "COMMENT", body = "" })
+      for _, root in ipairs(drafts) do
+        current.store:update(root.id, { status = "published", origin = "github" })
+      end
+      util.notify(string.format("Published %s · %d comment%s%s · %.1fs", payload.event,
+        #comments - #failed, (#comments - #failed) == 1 and "" or "s",
+        #failed > 0 and (" · " .. #failed .. " rejected") or "",
+        (vim.uv.hrtime() - started) / 1e9),
+        #failed > 0 and vim.log.levels.WARN or nil)
+      M.refresh()
+    end
+    -- One at a time, off the main loop, so the editor stays usable and GitHub's
+    -- secondary rate limiter is not tripped by a burst.
+    local function step()
+      if M.current ~= current then return end
+      index = index + 1
+      if index > #comments then
+        finish()
+        return
+      end
+      util.progress(string.format("Publishing comment %d/%d…", index, #comments))
+      local ok, add_err = gh_api.add_pending_thread(review_id, comments[index], meta.repo_root)
+      if not ok then
+        if gh_api.is_rate_limited(add_err) then
+          util.notify("GitHub is rate limiting; retrying in 30s", vim.log.levels.WARN)
+          index = index - 1
+          vim.defer_fn(step, 30000)
+          return
+        end
+        failed[#failed + 1] = index
+      end
+      vim.defer_fn(step, 120)
+    end
+    step()
+  end
+
   require("review.ui.publish").open(payload, drafts, function()
     local current, started = M.current, vim.uv.hrtime()
+    -- self_review is a preview hint, not part of GitHub's schema.
+    local wire = vim.deepcopy(payload)
+    wire.self_review = nil
+    if #comments > config.get().publish_batch_limit then
+      util.progress(string.format("Publishing %d comments one at a time…", #comments))
+      publish_incrementally(current, started)
+      return
+    end
     util.progress(string.format("Publishing %s with %d comment%s…",
       payload.event, #drafts, #drafts == 1 and "" or "s"))
     vim.defer_fn(function()
       if M.current ~= current then return end
-      local result, err = require("review.util.gh").submit_review(
-        meta.owner, meta.repo, meta.number, payload, meta.repo_root)
-      if not result then util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR); return end
-      -- Match responses by LOCATION, not array position: GitHub does not promise the
-      -- response preserves request order, and an off-by-one there attaches a remote
-      -- id to the wrong local thread, which then misroutes replies and resolves.
-      local remaining = {}
-      for _, remote in ipairs(type(result.comments) == "table" and result.comments or {}) do
-        local key = string.format("%s:%s:%s", remote.path or "",
-          tostring(remote.line or remote.original_line or ""), remote.side or "RIGHT")
-        remaining[key] = remaining[key] or {}
-        table.insert(remaining[key], remote)
+      local gh_api = require("review.util.gh")
+      local result, err = gh_api.submit_review(
+        meta.owner, meta.repo, meta.number, wire, meta.repo_root)
+      if not result then
+        -- GitHub can create the review and STILL answer with an error (a 500 after a
+        -- large submission is the common case). Reporting a plain failure left every
+        -- draft unpublished, and the obvious retry would post all of them twice — so
+        -- ask GitHub what actually landed before believing the error.
+        local landed, merged = M.reconcile_published(current, drafts)
+        if landed > 0 then
+          util.notify(string.format(
+            "GitHub reported an error, but %d/%d comment%s did land — marked published%s, not retried",
+            landed, #drafts, landed == 1 and "" or "s",
+            merged > 0 and (" (" .. merged .. " merged with the imported copy)") or ""),
+            vim.log.levels.WARN)
+          current.store:set_review_draft({ event = "COMMENT", body = "" })
+          M.refresh()
+          return
+        end
+        util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR)
+        return
       end
-      local matched = 0
-      for _, root in ipairs(drafts) do
-        local key = string.format("%s:%s:%s", root.file,
-          tostring(root.line_end or root.line_start), root.side or "RIGHT")
-        local bucket = remaining[key]
-        local remote = bucket and table.remove(bucket, 1) or nil
-        if remote then matched = matched + 1 end
-        current.store:update(root.id, {
-          status = "published", origin = "github",
-          github_id = remote and (remote.node_id or tostring(remote.id)) or root.github_id,
-        })
-      end
+      local matched = attach_ids(current, type(result.comments) == "table" and result.comments or {})
       -- The submission is spent; the next review starts from a clean summary.
       current.store:set_review_draft({ event = "COMMENT", body = "" })
       local unmatched = #drafts - matched
@@ -870,10 +1020,57 @@ function M.publish_threads(threads)
       M.refresh()
     end, 20)
   end, {
+    self_review = self_review,
     on_change = function(updated)
       store:set_review_draft({ event = updated.event, body = updated.body })
     end,
   })
+end
+
+--- Ask GitHub which of `drafts` already exist upstream, and mark those published.
+---
+--- Used after a failed submit: the API is not reliably all-or-nothing, so the only
+--- safe answer to "did that work?" is to look.
+---@param current table
+---@param drafts table[]
+---@return integer landed
+function M.reconcile_published(current, drafts)
+  local meta = current.source:metadata()
+  local remote = require("review.util.gh").list_review_comments(
+    meta.owner, meta.repo, meta.number, meta.repo_root)
+  if #remote == 0 then return 0 end
+  local index = {}
+  for _, comment in ipairs(remote) do
+    -- Body is the discriminator: two drafts can share a location, but the text a
+    -- reviewer wrote is what identifies their comment.
+    index[vim.trim(comment.body or "")] = comment
+  end
+  -- Upstream ids already represented in the store, so a draft is not relabelled into
+  -- a second local record for a comment the importer has already created.
+  local claimed = {}
+  for _, thread in ipairs(current.store:all_threads()) do
+    if thread.github_id then claimed[thread.github_id] = thread.id end
+  end
+  local landed, merged = 0, 0
+  for _, root in ipairs(drafts) do
+    local match = index[vim.trim(root.body or "")]
+    if match and not root.github_id then
+      local gid = match.node_id or tostring(match.id)
+      landed = landed + 1
+      if claimed[gid] and claimed[gid] ~= root.id then
+        -- The importer already holds this comment: the local draft is the same text
+        -- twice over, so drop it rather than leaving a duplicate thread on the line.
+        current.store:delete(root.id)
+        merged = merged + 1
+      else
+        claimed[gid] = root.id
+        current.store:update(root.id, {
+          status = "published", origin = "github", github_id = gid,
+        })
+      end
+    end
+  end
+  return landed, merged
 end
 
 --- Write a thread's suggestion into the working tree.
@@ -944,7 +1141,7 @@ function M.react_to_thread(root)
     local count = current[entry.content] or 0
     items[#items + 1] = vim.tbl_extend("force", entry, { count = count, mine = count > 0 })
   end
-  vim.ui.select(items, {
+  util.select(items, {
     prompt = "React to thread (again to remove):",
     format_item = function(item)
       return string.format("%s %s%s", item.emoji, item.label,
@@ -983,10 +1180,10 @@ function M.claude_review()
                     -- between invocations never builds muscle memory
   table.insert(names, 1, "(none)")
   table.insert(names, 2, "Custom instructions…")
-  vim.ui.select(names, { prompt = "Saved instruction profile:" }, function(choice)
+  util.select(names, { prompt = "Saved instruction profile:" }, function(choice)
     if not choice then return end
     local function permissions(instruction)
-      vim.ui.select({ "Read-only review", "Allow edits in repository-local worktree" },
+      util.select({ "Read-only review", "Allow edits in repository-local worktree" },
         { prompt = "Agent permissions:" }, function(permission)
         if permission then open_final_prompt(instruction, permission:match("^Allow") ~= nil) end
       end)

@@ -122,14 +122,30 @@ function GitHubPR:diffview_spec()
   return string.format("%s...%s", self._effective_base or self._base_sha, self._head_sha)
 end
 
+--- Requested reviewers plus everyone who has actually reviewed.
+---
+--- One person can submit many reviews; listing each submission repeated the same
+--- name once per review, so only their most recent state is kept.
+---@return string[]
 function GitHubPR:reviewers()
-  local out = {}
+  local out, seen = {}, {}
   for _, r in ipairs(self._pr.reviewRequests or {}) do
-    table.insert(out, r.login or (r.name or "team"))
+    local name = r.login or r.name or "team"
+    if not seen[name] then
+      seen[name] = #out + 1
+      out[#out + 1] = name .. " (requested)"
+    end
   end
   for _, r in ipairs(self._pr.reviews or {}) do
-    if r.author then
-      table.insert(out, r.author.login .. " (" .. (r.state or "") .. ")")
+    if r.author and r.author.login then
+      local name = r.author.login
+      local label = name .. " (" .. (r.state or "") .. ")"
+      if seen[name] then
+        out[seen[name]] = label -- reviews arrive oldest-first; the last one wins
+      else
+        seen[name] = #out + 1
+        out[#out + 1] = label
+      end
     end
   end
   return out
@@ -197,6 +213,7 @@ function GitHubPR:metadata()
     head_repo = self.head_repo,
     head_url = self.head_url,
     head_ref = self.head_ref,
+    base_ref = self._pr.baseRefName,
     base_sha = self._base_sha,
     head_sha = self._head_sha,
     repo_root = self.repo_root,

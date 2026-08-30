@@ -175,3 +175,120 @@ describe("performance report", function()
     assert.is_true(#label < 60)
   end)
 end)
+
+describe("GitHub error reporting", function()
+  local gh = require("review.util.gh")
+
+  it("surfaces the reason, not just the status line", function()
+    local body = '{"message":"Unprocessable Entity","errors":["Review Can not request changes on your own pull request"]}'
+    assert.equals("Review Can not request changes on your own pull request",
+      gh.error_message(body, "gh: Unprocessable Entity (HTTP 422)"))
+  end)
+
+  it("handles structured error objects and falls back to the message", function()
+    assert.equals("path is invalid",
+      gh.error_message('{"errors":[{"message":"path is invalid"}]}', "boom"))
+    assert.equals("Not Found", gh.error_message('{"message":"Not Found"}', "boom"))
+  end)
+
+  it("falls back to stderr when the body is not JSON", function()
+    assert.equals("gh: connection refused", gh.error_message("<html>", "gh: connection refused"))
+  end)
+
+  it("recognises throttling so a publish can back off instead of failing", function()
+    assert.is_true(gh.is_rate_limited("You have exceeded a secondary rate limit"))
+    assert.is_true(gh.is_rate_limited("API rate limit exceeded"))
+    assert.is_false(gh.is_rate_limited("Validation failed"))
+  end)
+end)
+
+describe("pull request metadata", function()
+  it("lists each reviewer once, at their latest state", function()
+    local PR = require("review.source.github_pr")
+    local pr = setmetatable({ _pr = {
+      reviewRequests = { { login = "alice" } },
+      reviews = {
+        { author = { login = "bob" }, state = "COMMENTED" },
+        { author = { login = "bob" }, state = "APPROVED" },
+        { author = { login = "alice" }, state = "CHANGES_REQUESTED" },
+      },
+    } }, PR)
+    assert.same({ "alice (CHANGES_REQUESTED)", "bob (APPROVED)" }, pr:reviewers())
+  end)
+end)
+
+describe("duplicate threads", function()
+  it("collapses two local records that point at one upstream comment", function()
+    local dir = fixture.create()
+    local source = assert(require("review.source").create(".", dir, { base = "main" }))
+    local store = require("review.comments.store").for_source(source)
+
+    local imported = store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 1, body = "same text" })
+    store:update(imported.id, { github_id = "GH9", github_thread_id = "T9", origin = "github" })
+    local stray = store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 1, body = "same text" })
+    store:update(stray.id, { github_id = "GH9", origin = "github" })
+
+    assert.equals(2, #store:all_threads())
+    assert.equals(1, store:dedupe_github())
+    assert.equals(1, #store:all_threads())
+    -- The importer's record survives: it is the one with upstream provenance.
+    assert.is_truthy(store:get(imported.id))
+    assert.is_nil(store:get(stray.id))
+  end)
+
+  it("leaves distinct comments alone", function()
+    local dir = fixture.create()
+    local source = assert(require("review.source").create(".", dir, { base = "main" }))
+    local store = require("review.comments.store").for_source(source)
+    local a = store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 1, body = "a" })
+    local b = store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 2, body = "b" })
+    store:update(a.id, { github_id = "GH1" })
+    store:update(b.id, { github_id = "GH2" })
+    assert.equals(0, store:dedupe_github())
+    assert.equals(2, #store:all_threads())
+  end)
+end)
+
+describe("inline rendering ownership", function()
+  local markers = require("review.ui.markers")
+  local config = require("review.config")
+
+  after_each(function()
+    config.setup({}) -- back to defaults
+    require("review").diffview_renders_github = false
+  end)
+
+  it("lets Diffview draw the threads it was handed, so nothing renders twice", function()
+    config.setup({ inline_owner = "auto" })
+    require("review").diffview_renders_github = true
+    assert.is_true(markers.delegated({ origin = "github" }))
+    -- Local drafts were never bridged, so they stay ours to draw.
+    assert.is_false(markers.delegated({ origin = "local" }))
+  end)
+
+  it("draws everything itself when the bridge is not active", function()
+    config.setup({ inline_owner = "auto" })
+    require("review").diffview_renders_github = false
+    assert.is_false(markers.delegated({ origin = "github" }))
+  end)
+
+  it("honours an explicit owner", function()
+    config.setup({ inline_owner = "review" })
+    require("review").diffview_renders_github = true
+    assert.is_false(markers.delegated({ origin = "github" }))
+    config.setup({ inline_owner = "diffview" })
+    assert.is_true(markers.delegated({ origin = "local" }))
+  end)
+end)
+
+describe("publish preview", function()
+  it("warns when reviewing your own pull request", function()
+    local text = table.concat(require("review.ui.publish").lines(
+      { event = "APPROVE", commit_id = "abc", body = "", self_review = true },
+      { { file = "a.lua", line_start = 1, side = "RIGHT", body = "x" } }), "\n")
+    assert.is_truthy(text:find("only accepts COMMENT", 1, true))
+    -- The footer must survive: a nil in the middle of a table constructor used to
+    -- leave #lines undefined and swallow everything appended after it.
+    assert.is_truthy(text:find("Ctrl-S publish", 1, true))
+  end)
+end)

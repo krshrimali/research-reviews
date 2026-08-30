@@ -67,6 +67,21 @@ end
 ---@param store table
 ---@param file string
 ---@param side string
+--- True when this thread's inline block is Diffview's to draw, not ours.
+---@param root table
+---@return boolean
+function M.delegated(root)
+  local owner = require("review.config").get().inline_owner or "auto"
+  if owner == "review" then
+    return false
+  end
+  if owner == "diffview" then
+    return true
+  end
+  -- "auto": Diffview only ever receives the github-origin threads we bridge to it.
+  return root.origin == "github" and require("review").diffview_renders_github == true
+end
+
 function M.render(bufnr, store, file, side, winid)
   if not vim.api.nvim_buf_is_valid(bufnr) then
     return
@@ -77,7 +92,7 @@ function M.render(bufnr, store, file, side, winid)
   for _, root in ipairs(store:threads_for_file(file)) do
     -- Skip anchors past the end of this buffer rather than stacking them on the last
     -- line (they belong to the other side or are outdated).
-    if root.side == side and not root.hidden then
+    if root.side == side and not root.hidden and not M.delegated(root) then
       local ok, dv = pcall(require, "diffview")
       local lnum = ok and dv.line_for and dv.line_for({ winid = winid, side = side, line = root.line_start or 1 })
         or root.line_start

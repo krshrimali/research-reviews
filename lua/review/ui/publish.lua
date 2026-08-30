@@ -32,10 +32,17 @@ function M.lines(payload, drafts)
   local lines = {
     "# Publish GitHub review", "",
     ("Verdict: `%s` — %s"):format(event, EVENT_HELP[event] or ""),
+  }
+  -- Appended, not placed in the constructor: a nil hole in a table literal leaves
+  -- `#lines` undefined and every later insert lands somewhere unpredictable.
+  if payload.self_review then
+    lines[#lines + 1] = "Your own pull request: GitHub only accepts COMMENT here."
+  end
+  vim.list_extend(lines, {
     ("Commit: `%s`"):format(payload.commit_id or ""),
     ("Comments: **%d**"):format(#drafts), "",
     "## Review summary", "",
-  }
+  })
   if vim.trim(body) == "" then
     lines[#lines + 1] = "_(empty — press b to write one)_"
   else
@@ -114,6 +121,14 @@ function M.open(payload, drafts, on_submit, opts)
     if closed then return end
     if payload.event == "REQUEST_CHANGES" and vim.trim(payload.body or "") == "" then
       util.notify("requesting changes needs a summary — press b", vim.log.levels.WARN)
+      return
+    end
+    -- GitHub refuses APPROVE and REQUEST_CHANGES on your own pull request. Catching
+    -- it here costs one cached API call and saves losing a 69-comment submission to
+    -- a bare 422 after the fact.
+    if opts.self_review and payload.event ~= "COMMENT" then
+      util.notify(("GitHub does not allow %s on your own pull request — press e for COMMENT")
+        :format(payload.event), vim.log.levels.WARN)
       return
     end
     close()

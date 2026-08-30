@@ -148,6 +148,23 @@ function M.spinner(msg)
   return handle
 end
 
+--- `vim.ui.select` for lists that are not files.
+---
+--- Snacks' default previewer assumes every item has a `file` and renders
+--- "error: Item has no `file`" beside a list of reaction names. Ask it for no
+--- preview; every other backend ignores the extra key.
+---@param items any[]
+---@param opts table
+---@param on_choice fun(item:any, idx:integer|nil)
+function M.select(items, opts, on_choice)
+  opts = vim.tbl_extend("keep", opts or {}, {
+    -- Only the preview: overriding `layout` too would discard the picker's own
+    -- height fitting for short lists.
+    snacks = { preview = "none" },
+  })
+  vim.ui.select(items, opts, on_choice)
+end
+
 --- Return true and the module if `require(name)` succeeds, else false, err.
 ---@param name string
 ---@return boolean ok, any mod_or_err
