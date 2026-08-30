@@ -2,6 +2,15 @@
 
 local util = require("review.util")
 local M = {}
+local ns = vim.api.nvim_create_namespace("review_workspace")
+
+vim.api.nvim_set_hl(0, "ReviewWorkspaceTab", { default = true, link = "Comment" })
+vim.api.nvim_set_hl(0, "ReviewWorkspaceTabActive", { default = true, link = "IncSearch" })
+vim.api.nvim_set_hl(0, "ReviewWorkspaceSection", { default = true, link = "Title" })
+vim.api.nvim_set_hl(0, "ReviewWorkspaceAuthor", { default = true, link = "DiagnosticInfo" })
+vim.api.nvim_set_hl(0, "ReviewWorkspaceReaction", { default = true, link = "Special" })
+vim.api.nvim_set_hl(0, "ReviewWorkspaceOutdated", { default = true, link = "DiagnosticWarn" })
+vim.api.nvim_set_hl(0, "ReviewWorkspaceLink", { default = true, link = "Underlined" })
 
 local modes = { "Conversation", "Timeline", "Claude", "Comments" }
 
@@ -25,6 +34,7 @@ local function header(lines, st)
   end
   lines[#lines + 1] = table.concat(tabs, "   ")
   lines[#lines + 1] = string.rep("─", math.min(100, vim.o.columns - 4))
+  lines[#lines + 1] = "1–5 switch views · ] next view · <leader>pc / <leader>rC Claude review · <leader>p actions · q close"
   lines[#lines + 1] = st.source:title()
   lines[#lines + 1] = ("@%s · updated %s"):format(st.source:author(), util.relative_time(st.source:updated_at()))
   lines[#lines + 1] = ""
@@ -128,6 +138,41 @@ local function render(st)
   vim.bo[st.buf].modifiable = true
   vim.api.nvim_buf_set_lines(st.buf, 0, -1, false, lines)
   vim.bo[st.buf].modifiable = false
+  vim.api.nvim_buf_clear_namespace(st.buf, ns, 0, -1)
+  for row, line in ipairs(lines) do
+    local zero = row - 1
+    if line:match("^##") then
+      vim.api.nvim_buf_add_highlight(st.buf, ns, "ReviewWorkspaceSection", zero, 0, -1)
+    end
+    local from = 1
+    while true do
+      local a, b = line:find("@[%w_.-]+", from)
+      if not a then break end
+      vim.api.nvim_buf_add_highlight(st.buf, ns, "ReviewWorkspaceAuthor", zero, a - 1, b); from = b + 1
+    end
+    from = 1
+    while true do
+      local a, b = line:find("%[[%w_+-]+ %d+%]", from)
+      if not a then break end
+      vim.api.nvim_buf_add_highlight(st.buf, ns, "ReviewWorkspaceReaction", zero, a - 1, b); from = b + 1
+    end
+    from = 1
+    while true do
+      local a, b = line:find("https?://%S+", from)
+      if not a then break end
+      vim.api.nvim_buf_add_highlight(st.buf, ns, "ReviewWorkspaceLink", zero, a - 1, b); from = b + 1
+    end
+    local a, b = line:find("OUTDATED")
+    if a then vim.api.nvim_buf_add_highlight(st.buf, ns, "ReviewWorkspaceOutdated", zero, a - 1, b) end
+  end
+  local from = 1
+  while true do
+    local a, b = lines[1]:find("%[?%d [A-Za-z]+%]?", from)
+    if not a then break end
+    local active = lines[1]:sub(a, a) == "["
+    vim.api.nvim_buf_add_highlight(st.buf, ns, active and "ReviewWorkspaceTabActive" or "ReviewWorkspaceTab", 0, a - 1, b)
+    from = b + 1
+  end
   vim.api.nvim_win_set_cursor(0, { 1, 0 })
 end
 

@@ -83,6 +83,9 @@ describe("comments panel", function()
     assert.is_truthy(text:find("Outdated (1)", 1, true))
     assert.is_truthy(text:find("OUTDATED — no current diff anchor", 1, true))
     assert.is_truthy(text:find("[eyes 2]", 1, true))
+    local marks = vim.api.nvim_buf_get_extmarks(0, vim.api.nvim_get_namespaces().review_workspace, 0, -1,
+      { details = true })
+    assert.is_true(#marks > 0, "workspace applies semantic highlights")
     vim.cmd("tabclose")
   end)
 
