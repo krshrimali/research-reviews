@@ -162,7 +162,14 @@ local function browser_lines(model)
   local query = model.query:lower()
   for _, item in ipairs(model.items) do
     if query == "" or (item.search or item.label):lower():find(query, 1, true) then
-      lines[#lines + 1] = item.label
+      local width = math.max(20, (model.width or vim.o.columns) - 2)
+      local label = item.label
+      if item.raw and width < 96 then
+        local prefix = "#" .. tostring(item.raw.number) .. " "
+        local suffix = "  " .. tostring(item.raw.state or "")
+        label = prefix .. util.truncate(item.raw.title or "", math.max(8, width - #prefix - #suffix)) .. suffix
+      end
+      lines[#lines + 1] = util.truncate(label, width)
       map[#lines] = item
     end
   end
@@ -184,12 +191,18 @@ local function open_browser(cwd, opts, on_choose)
   vim.api.nvim_win_set_buf(0, buf)
   vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile = "nofile", "wipe", false
   vim.bo[buf].filetype = "review-sources"
+  vim.wo.wrap, vim.wo.linebreak = false, false
   vim.api.nvim_buf_set_name(buf, "review://sources/" .. util.hash(cwd) .. "/" .. model.source)
 
   local timer
   local function render()
     if not vim.api.nvim_buf_is_valid(buf) then return end
     local cursor = vim.api.nvim_win_get_cursor(0)
+    local wins = vim.fn.win_findbuf(buf)
+    if wins[1] and vim.api.nvim_win_is_valid(wins[1]) then
+      local info = vim.fn.getwininfo(wins[1])[1] or {}
+      model.width = vim.api.nvim_win_get_width(wins[1]) - (info.textoff or 0)
+    end
     local lines, map = browser_lines(model)
     model.map = map
     vim.bo[buf].modifiable = true
@@ -202,7 +215,11 @@ local function open_browser(cwd, opts, on_choose)
   local function stop_spinner()
     if timer then timer:stop(); timer:close(); timer = nil end
   end
-  vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, once = true, callback = stop_spinner })
+  local resize_id = vim.api.nvim_create_autocmd("VimResized", { callback = render })
+  vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, once = true, callback = function()
+    stop_spinner()
+    pcall(vim.api.nvim_del_autocmd, resize_id)
+  end })
 
   local function load(force)
     local started = vim.uv.hrtime()
@@ -221,7 +238,7 @@ local function open_browser(cwd, opts, on_choose)
       model.loading = false; render(); return
     end
     model.loading, model.spinner = true, "⠋"
-    util.notify(string.format("Loading %s pull requests…", model.state))
+    util.progress(string.format("Loading %s pull requests…", model.state))
     local frames, frame = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }, 1
     stop_spinner()
     timer = vim.uv.new_timer()

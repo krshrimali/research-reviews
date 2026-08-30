@@ -28,6 +28,20 @@ describe("deletion persistence (tombstones)", function()
 end)
 
 describe("github_sync preserves local resolution", function()
+  it("maps imported roots and nested replies into Diffview's comments tree", function()
+    local _, _, store = setup()
+    local root = store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 2,
+      body = "root", origin = "github", author = "alice", github_thread_id = "T0" })
+    store:reply(root.id, "answer", { origin = "github", author = "bob" })
+    local mapped = require("review")._diffview_github_threads(store)
+    assert.equals(1, #mapped)
+    assert.equals("src/auth.lua", mapped[1].path)
+    assert.equals("b", mapped[1].side)
+    assert.equals("alice", mapped[1].author)
+    assert.equals(1, #mapped[1].replies)
+    assert.equals("bob", mapped[1].replies[1].author)
+  end)
+
   it("does not revert a locally-resolved thread on re-import", function()
     local _, source, store = setup()
     -- Fake source exposing an unresolved upstream thread.
@@ -64,7 +78,8 @@ describe("github_sync preserves local resolution", function()
     local node = {
       id = "T2", isResolved = false, isOutdated = false, path = "src/auth.lua", line = 2,
       diffSide = "RIGHT", comments = { nodes = {
-        { id = "C2", author = { login = "alice" }, body = "root", createdAt = "2026-01-01T00:00:00Z" },
+        { id = "C2", author = { login = "alice" }, body = "root", path = vim.NIL,
+          line = vim.NIL, originalLine = 2, createdAt = "2026-01-01T00:00:00Z" },
         { id = "C3", author = { login = "bob" }, body = "reply", createdAt = "2026-01-02T00:00:00Z" },
       } },
     }
@@ -85,6 +100,7 @@ describe("github_sync preserves local resolution", function()
     assert.equals(1, #store:replies(root.id))
     assert.equals("bob", store:replies(root.id)[1].author)
     node.line, node.isOutdated = 3, true
+    node.comments.nodes[1].originalLine = vim.NIL
     node.comments.nodes[1].body = "updated root"
     assert.equals(0, sync.import(fake, store))
     root = store:get(root.id)

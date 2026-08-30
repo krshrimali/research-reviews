@@ -37,11 +37,47 @@ function M.hash(s)
   return string.format("%08x", h)
 end
 
---- Notify helper that tags the source.
+local notice = {}
+
+local function show_notice(msg, level, timeout)
+  vim.schedule(function()
+    if #vim.api.nvim_list_uis() == 0 then return end
+    if notice.win and vim.api.nvim_win_is_valid(notice.win) then
+      vim.api.nvim_win_close(notice.win, true)
+    end
+    local text = "review.nvim · " .. (msg or ""):gsub("[\r\n]+", " ")
+    local width = math.min(math.max(28, vim.fn.strdisplaywidth(text)), math.max(28, vim.o.columns - 6))
+    text = M.truncate(text, width)
+    local buf = vim.api.nvim_create_buf(false, true)
+    vim.bo[buf].buftype, vim.bo[buf].bufhidden = "nofile", "wipe"
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { text })
+    local hl = level == vim.log.levels.ERROR and "ErrorMsg"
+      or level == vim.log.levels.WARN and "WarningMsg" or "NormalFloat"
+    notice.buf = buf
+    notice.win = vim.api.nvim_open_win(buf, false, {
+      relative = "editor", row = math.max(0, vim.o.lines - 5),
+      col = math.max(0, vim.o.columns - width - 3), width = width, height = 1,
+      style = "minimal", border = "rounded", focusable = false, noautocmd = true, zindex = 250,
+    })
+    vim.wo[notice.win].winhl = "Normal:" .. hl .. ",FloatBorder:" .. hl
+    vim.defer_fn(function()
+      if notice.buf == buf and notice.win and vim.api.nvim_win_is_valid(notice.win) then
+        vim.api.nvim_win_close(notice.win, true)
+      end
+    end, timeout or 3500)
+  end)
+end
+
 ---@param msg string
 ---@param level integer|nil vim.log.levels.*
 function M.notify(msg, level)
-  vim.notify(msg, level or vim.log.levels.INFO, { title = "review.nvim" })
+  M.last_notification = msg
+  show_notice(msg, level, level == vim.log.levels.ERROR and 6500 or 3500)
+end
+
+---@param msg string
+function M.progress(msg)
+  show_notice(msg, vim.log.levels.INFO, 10000)
 end
 
 --- Return true and the module if `require(name)` succeeds, else false, err.

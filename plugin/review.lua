@@ -8,24 +8,28 @@ local function review()
   return require("review")
 end
 
+local function later(fn)
+  vim.schedule(function() fn(review()) end)
+end
+
 -- :Review [<pr-number|url|branch|.>]  — open a review (defaults to current branch).
 vim.api.nvim_create_user_command("Review", function(opts)
   local arg = opts.args ~= "" and opts.args or nil
-  review().open(arg)
+  later(function(r) r.open(arg) end)
 end, { nargs = "?", desc = "Open a PR/branch review" })
 
 -- :ReviewList — persistent review browser.
 vim.api.nvim_create_user_command("ReviewList", function()
-  review().open_list()
+  later(function(r) r.open_list() end)
 end, { desc = "Browse PRs/branches to review" })
 
-vim.api.nvim_create_user_command("ReviewPRs", function() review().open_pull_requests() end,
+vim.api.nvim_create_user_command("ReviewPRs", function() later(function(r) r.open_pull_requests() end) end,
   { desc = "Pick a pull request to review" })
-vim.api.nvim_create_user_command("ReviewBranches", function() review().open_branches() end,
+vim.api.nvim_create_user_command("ReviewBranches", function() later(function(r) r.open_branches() end) end,
   { desc = "Pick a local branch to review" })
-vim.api.nvim_create_user_command("ReviewCommits", function() review().open_commits() end,
+vim.api.nvim_create_user_command("ReviewCommits", function() later(function(r) r.open_commits() end) end,
   { desc = "Pick a commit to review" })
-vim.api.nvim_create_user_command("ReviewCurrent", function() review().open_current() end,
+vim.api.nvim_create_user_command("ReviewCurrent", function() later(function(r) r.open_current() end) end,
   { desc = "Review the current branch against its base" })
 
 -- :ReviewClaude — dispatch an async Claude review.
@@ -43,15 +47,15 @@ vim.api.nvim_create_user_command("ReviewComments", function()
   review().toggle_comments_panel()
 end, { desc = "Toggle the comments side-panel" })
 
-vim.api.nvim_create_user_command("ReviewRefresh", function() review().refresh() end,
+vim.api.nvim_create_user_command("ReviewRefresh", function() later(function(r) r.refresh() end) end,
   { desc = "Refresh the active PR and its comments" })
 vim.api.nvim_create_user_command("ReviewChat", function() review().toggle_chat() end,
   { desc = "Toggle the Sidekick review chat" })
 vim.api.nvim_create_user_command("ReviewPrompt", function() review().copy_prompt() end,
   { desc = "Edit, copy, or run the review prompt" })
-vim.api.nvim_create_user_command("ReviewImport", function() review().import_github_comments() end,
+vim.api.nvim_create_user_command("ReviewImport", function() later(function(r) r.import_github_comments() end) end,
   { desc = "Import or refresh GitHub review comments" })
-vim.api.nvim_create_user_command("ReviewSync", function() review().sync_claude_result() end,
+vim.api.nvim_create_user_command("ReviewSync", function() later(function(r) r.sync_claude_result() end) end,
   { desc = "Import the latest Claude findings from its transcript" })
 vim.api.nvim_create_user_command("ReviewQuickfix", function() review().threads_to_quickfix() end,
   { desc = "Export review threads to quickfix" })

@@ -5,6 +5,46 @@ local util = require("review.util")
 
 local M = {}
 
+local function diffview_github_threads(store)
+  local mapped = {}
+  for _, root in ipairs(store:all_threads()) do
+    if root.origin == "github" then
+      local replies = {}
+      for _, reply in ipairs(store:replies(root.id)) do
+        replies[#replies + 1] = {
+          author = reply.author, body = reply.body, suggestion = reply.suggestion_text,
+        }
+      end
+      mapped[#mapped + 1] = {
+        path = root.file, side = root.side == "LEFT" and "a" or "b",
+        lnum = root.line_start or 1, end_lnum = root.line_end or root.line_start or 1,
+        text = root.body or "", origin = "github", author = root.author,
+        resolved = root.status == "resolved", outdated = root.status == "outdated",
+        thread_id = root.github_thread_id, replies = replies,
+      }
+    end
+  end
+  return mapped
+end
+
+M._diffview_github_threads = diffview_github_threads
+
+local function sync_diffview_github_comments(current, attempts)
+  if not current or M.current ~= current then return end
+  local ok_lib, lib = pcall(require, "diffview.lib")
+  local ok_review, review = pcall(require, "diffview.review")
+  local view = ok_lib and lib.get_current_view() or nil
+  if not view then
+    if (attempts or 0) < 5 then
+      vim.defer_fn(function() sync_diffview_github_comments(current, (attempts or 0) + 1) end, 80)
+    end
+    return
+  end
+  if ok_review and review.import_threads then
+    review.import_threads(view, diffview_github_threads(current.store), "github")
+  end
+end
+
 ---@class ReviewContext
 ---@field source table
 ---@field store table
@@ -93,8 +133,7 @@ function M.reply_thread(root, on_done)
       local reply = M.current.store:reply(root.id, body, { suggestion_text = is_sugg and sugg or nil })
       if root.github_thread_id and M.current.source:kind() == "pr" then
         local started = vim.uv.hrtime()
-        util.notify("Posting reply to GitHub…")
-        vim.cmd("redraw")
+        util.progress("Posting reply to GitHub…")
         local gid, err = require("review.util.gh").reply_thread(root.github_thread_id, body,
           M.current.source:metadata().repo_root)
         if gid then
@@ -127,8 +166,7 @@ function M.resolve_thread(root, on_done)
   M.current.store:set_resolved(root.id, resolved)
   if root.github_thread_id and M.current.source:kind() == "pr" then
     local started = vim.uv.hrtime()
-    util.notify((resolved and "Resolving" or "Reopening") .. " GitHub thread…")
-    vim.cmd("redraw")
+    util.progress((resolved and "Resolving" or "Reopening") .. " GitHub thread…")
     local ok, err = require("review.util.gh").resolve_thread(root.github_thread_id, resolved,
       M.current.source:metadata().repo_root)
     if not ok then
@@ -351,8 +389,7 @@ end
 function M.open(arg, opts)
   opts = vim.tbl_extend("force", { base = config.get().local_base }, opts or {})
   local started = vim.uv.hrtime()
-  util.notify("Opening review and loading repository metadata…")
-  vim.cmd("redraw")
+  util.progress("Opening review and loading repository metadata…")
   local Source = require("review.source")
   local source, err = Source.create(arg, opts.cwd or vim.fn.getcwd(), opts)
   if not source then
@@ -368,14 +405,14 @@ function M.open(arg, opts)
 
   -- Import GitHub threads for PRs (best-effort).
   if source:caps().has_threads then
-    pcall(function()
-      require("review.comments.github_sync").import(source, store)
-    end)
+    local _, import_err = require("review.comments.github_sync").import(source, store)
+    if import_err then util.notify("GitHub comments were not imported: " .. tostring(import_err), vim.log.levels.WARN) end
   end
 
   -- The diff is the ONE default surface (diffview + inline comments). The overview
   -- tab and comments panel are opt-in via the menu (<leader>p → O / P).
   require("review.ui.diff").open(source)
+  vim.defer_fn(function() sync_diffview_github_comments(M.current, 0) end, 50)
 
   if config.get().workspace.comments and vim.o.columns >= config.get().workspace.comments_min_columns then
     vim.schedule(function()
@@ -427,7 +464,7 @@ function M.refresh()
   elseif old:kind() == "commit" then arg = { kind = "commit", rev = old.rev }
   else arg = old.branch end
   local Source = require("review.source")
-  util.notify("Refreshing metadata, commits, checks, and threads…")
+  util.progress("Refreshing metadata, commits, checks, and threads…")
   local old_meta = old:metadata()
   local refresh_base = old:kind() == "branch" and (old_meta.requested_base or "auto") or old.base_ref
   vim.defer_fn(function()
@@ -442,6 +479,7 @@ function M.refresh()
     if fresh:caps().has_threads then require("review.comments.github_sync").import(fresh, current.store) end
     current.store:reanchor(rename_map(fresh))
     require("review.ui.diff").refresh_markers(current.store)
+    sync_diffview_github_comments(current, 0)
     if ctx then require("diffview").open_review_location({ path = ctx.file, side = ctx.side, line = ctx.line }) end
     local new_threads = #current.store:all_threads() - before_threads
     util.notify(string.format("Refreshed · head %s · %s%d new thread%s · %.1fs",
@@ -457,7 +495,7 @@ function M.import_github_comments()
   end
   local current, started = M.current, vim.uv.hrtime()
   current.source._threads = nil
-  util.notify("Importing GitHub review comments…")
+  util.progress("Importing GitHub review comments…")
   vim.defer_fn(function()
     if M.current ~= current then return end
     local imported, err, refreshed = require("review.comments.github_sync").import(current.source, current.store)
@@ -466,6 +504,7 @@ function M.import_github_comments()
       return
     end
     require("review.ui.diff").refresh_markers(current.store)
+    sync_diffview_github_comments(current, 0)
     if require("review.ui.comments_panel").is_open() then
       require("review.ui.comments_panel").render(current.store, nil, "RIGHT")
     end
@@ -480,8 +519,7 @@ end
 function M.sync_claude_result()
   if not M.current then util.notify("open a review first", vim.log.levels.WARN); return end
   local started = vim.uv.hrtime()
-  util.notify("Synchronizing Claude transcript and inline findings…")
-  vim.cmd("redraw")
+  util.progress("Synchronizing Claude transcript and inline findings…")
   local sessions = vim.tbl_values(M.current.store.sessions or {})
   table.sort(sessions, function(a, b) return (a.started_at or "") > (b.started_at or "") end)
   local session = sessions[1]
@@ -603,7 +641,7 @@ function M.publish_threads(threads)
   }
   require("review.ui.publish").open(payload, drafts, function()
     local current, started = M.current, vim.uv.hrtime()
-    util.notify(string.format("Publishing %d review comment%s to GitHub…",
+    util.progress(string.format("Publishing %d review comment%s to GitHub…",
       #drafts, #drafts == 1 and "" or "s"))
     vim.defer_fn(function()
       if M.current ~= current then return end
