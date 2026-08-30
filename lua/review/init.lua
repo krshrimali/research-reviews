@@ -92,10 +92,14 @@ function M.reply_thread(root, on_done)
     on_submit = function(body, is_sugg, sugg)
       local reply = M.current.store:reply(root.id, body, { suggestion_text = is_sugg and sugg or nil })
       if root.github_thread_id and M.current.source:kind() == "pr" then
+        local started = vim.uv.hrtime()
+        util.notify("Posting reply to GitHub…")
+        vim.cmd("redraw")
         local gid, err = require("review.util.gh").reply_thread(root.github_thread_id, body,
           M.current.source:metadata().repo_root)
         if gid then
           M.current.store:update(reply.id, { github_id = gid, origin = "github", status = "published" })
+          util.notify(string.format("Reply posted to GitHub · %.1fs", (vim.uv.hrtime() - started) / 1e9))
         else
           util.notify("reply kept as draft: " .. tostring(err), vim.log.levels.WARN)
         end
@@ -122,6 +126,9 @@ function M.resolve_thread(root, on_done)
   local resolved = root.status ~= "resolved"
   M.current.store:set_resolved(root.id, resolved)
   if root.github_thread_id and M.current.source:kind() == "pr" then
+    local started = vim.uv.hrtime()
+    util.notify((resolved and "Resolving" or "Reopening") .. " GitHub thread…")
+    vim.cmd("redraw")
     local ok, err = require("review.util.gh").resolve_thread(root.github_thread_id, resolved,
       M.current.source:metadata().repo_root)
     if not ok then
@@ -129,6 +136,8 @@ function M.resolve_thread(root, on_done)
       util.notify("GitHub resolve failed: " .. tostring(err), vim.log.levels.WARN)
       return false
     end
+    util.notify(string.format("GitHub thread %s · %.1fs", resolved and "resolved" or "reopened",
+      (vim.uv.hrtime() - started) / 1e9))
   end
   require("review.ui.diff").refresh_markers(M.current.store)
   if on_done then on_done(root) end
@@ -327,7 +336,7 @@ function M.choose_source()
     { key = "b", label = "Local branch", fn = M.open_branches },
     { key = "c", label = "Single commit", fn = M.open_commits },
     { key = "h", label = "Current branch against its base", fn = M.open_current },
-    { key = "l", label = "Combined PR / branch picker", fn = M.open_list },
+    { key = "l", label = "Combined PR / branch browser", fn = M.open_list },
     { key = "?", label = "Help and key reference", fn = M.help },
   }, { title = "Review target" })
 end
@@ -341,6 +350,9 @@ end
 ---@param opts table|nil { base=string }
 function M.open(arg, opts)
   opts = vim.tbl_extend("force", { base = config.get().local_base }, opts or {})
+  local started = vim.uv.hrtime()
+  util.notify("Opening review and loading repository metadata…")
+  vim.cmd("redraw")
   local Source = require("review.source")
   local source, err = Source.create(arg, opts.cwd or vim.fn.getcwd(), opts)
   if not source then
@@ -371,8 +383,8 @@ function M.open(arg, opts)
     end)
   end
 
-  util.notify(string.format("%s · %d comments · <leader>p for actions",
-    source:title(), vim.tbl_count(store.comments)))
+  util.notify(string.format("Review opened · %s · %d comments · %.1fs · <leader>p for actions",
+    source:title(), vim.tbl_count(store.comments), (vim.uv.hrtime() - started) / 1e9))
 end
 
 --- Open the fuzzy source picker.
@@ -404,56 +416,72 @@ end
 
 function M.refresh()
   if not M.current then return end
-  local old = M.current.source
-  local before_threads, before_head = #M.current.store:all_threads(), old:head_rev()
+  if M._refreshing then util.notify("A review refresh is already running", vim.log.levels.INFO); return end
+  M._refreshing = true
+  local current, started = M.current, vim.uv.hrtime()
+  local old = current.source
+  local before_threads, before_head = #current.store:all_threads(), old:head_rev()
   local ctx = require("review.ui.diff").context()
   local arg
   if old:kind() == "pr" then arg = old.number
   elseif old:kind() == "commit" then arg = { kind = "commit", rev = old.rev }
   else arg = old.branch end
   local Source = require("review.source")
-  util.notify("refreshing metadata, commits, checks, and threads…")
+  util.notify("Refreshing metadata, commits, checks, and threads…")
   local old_meta = old:metadata()
   local refresh_base = old:kind() == "branch" and (old_meta.requested_base or "auto") or old.base_ref
-  local fresh, err = Source.create(arg, old_meta.repo_root, { base = refresh_base })
-  if not fresh then
-    util.notify("refresh failed: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
-  M.current.source, M.current.store.source = fresh, fresh
-  if fresh:caps().has_threads then require("review.comments.github_sync").import(fresh, M.current.store) end
-  M.current.store:reanchor(rename_map(fresh))
-  require("review.ui.diff").refresh_markers(M.current.store)
-  if ctx then require("diffview").open_review_location({ path = ctx.file, side = ctx.side, line = ctx.line }) end
-  local new_threads = #M.current.store:all_threads() - before_threads
-  util.notify(string.format("refreshed · head %s · %s%d new thread%s", before_head == fresh:head_rev()
-    and "unchanged" or ("advanced to " .. fresh:head_rev():sub(1, 8)), new_threads >= 0 and "+" or "",
-    new_threads, math.abs(new_threads) == 1 and "" or "s"))
+  vim.defer_fn(function()
+    local fresh, err = Source.create(arg, old_meta.repo_root, { base = refresh_base })
+    M._refreshing = false
+    if M.current ~= current then return end
+    if not fresh then
+      util.notify("Refresh failed: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    current.source, current.store.source = fresh, fresh
+    if fresh:caps().has_threads then require("review.comments.github_sync").import(fresh, current.store) end
+    current.store:reanchor(rename_map(fresh))
+    require("review.ui.diff").refresh_markers(current.store)
+    if ctx then require("diffview").open_review_location({ path = ctx.file, side = ctx.side, line = ctx.line }) end
+    local new_threads = #current.store:all_threads() - before_threads
+    util.notify(string.format("Refreshed · head %s · %s%d new thread%s · %.1fs",
+      before_head == fresh:head_rev() and "unchanged" or ("advanced to " .. fresh:head_rev():sub(1, 8)),
+      new_threads >= 0 and "+" or "", new_threads, math.abs(new_threads) == 1 and "" or "s",
+      (vim.uv.hrtime() - started) / 1e9))
+  end, 20)
 end
 
 function M.import_github_comments()
   if not M.current or M.current.source:kind() ~= "pr" then
     util.notify("GitHub comment import requires a PR", vim.log.levels.WARN); return
   end
-  M.current.source._threads = nil
-  util.notify("importing GitHub review threads…")
-  vim.cmd("redraw")
-  local imported, err = require("review.comments.github_sync").import(M.current.source, M.current.store)
-  if err then
-    util.notify("GitHub comment import failed: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
-  require("review.ui.diff").refresh_markers(M.current.store)
-  if require("review.ui.comments_panel").is_open() then
-    require("review.ui.comments_panel").render(M.current.store, nil, "RIGHT")
-  end
-  util.notify(string.format("GitHub comments imported · %d new", imported))
+  local current, started = M.current, vim.uv.hrtime()
+  current.source._threads = nil
+  util.notify("Importing GitHub review comments…")
+  vim.defer_fn(function()
+    if M.current ~= current then return end
+    local imported, err, refreshed = require("review.comments.github_sync").import(current.source, current.store)
+    if err then
+      util.notify("GitHub comment import failed: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    require("review.ui.diff").refresh_markers(current.store)
+    if require("review.ui.comments_panel").is_open() then
+      require("review.ui.comments_panel").render(current.store, nil, "RIGHT")
+    end
+    local elapsed = (vim.uv.hrtime() - started) / 1e9
+    util.notify(string.format("GitHub comments imported · %d new · %d updated · %.1fs",
+      imported, refreshed or 0, elapsed))
+  end, 20)
 end
 
 ---Recover/import the latest Claude result from its persisted Sidekick transcript.
 ---Useful when an older live poller saw terminal-reflowed JSON and could not parse it.
 function M.sync_claude_result()
   if not M.current then util.notify("open a review first", vim.log.levels.WARN); return end
+  local started = vim.uv.hrtime()
+  util.notify("Synchronizing Claude transcript and inline findings…")
+  vim.cmd("redraw")
   local sessions = vim.tbl_values(M.current.store.sessions or {})
   table.sort(sessions, function(a, b) return (a.started_at or "") > (b.started_at or "") end)
   local session = sessions[1]
@@ -477,8 +505,8 @@ function M.sync_claude_result()
   else
     M.toggle_comments_panel(true)
   end
-  util.notify(string.format("Claude review synchronized · %d findings · %d replies",
-    #(session.findings or {}), #(session.replied or {})))
+  util.notify(string.format("Claude review synchronized · %d findings · %d replies · %.1fs",
+    #(session.findings or {}), #(session.replied or {}), (vim.uv.hrtime() - started) / 1e9))
 end
 
 function M.threads_to_quickfix(threads)
@@ -574,18 +602,25 @@ function M.publish_threads(threads)
     commit_id = src:head_rev(), event = "COMMENT", body = "Review submitted from review.nvim", comments = comments,
   }
   require("review.ui.publish").open(payload, drafts, function()
-    local result, err = require("review.util.gh").submit_review(
-      meta.owner, meta.repo, meta.number, payload, meta.repo_root)
-    if not result then util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR); return end
-    for i, root in ipairs(drafts) do
-      local remote = type(result.comments) == "table" and result.comments[i] or nil
-      M.current.store:update(root.id, {
-        status = "published", origin = "github",
-        github_id = remote and (remote.node_id or tostring(remote.id)) or root.github_id,
-      })
-    end
-    M.refresh()
-    util.notify(string.format("published %d review comments", #drafts))
+    local current, started = M.current, vim.uv.hrtime()
+    util.notify(string.format("Publishing %d review comment%s to GitHub…",
+      #drafts, #drafts == 1 and "" or "s"))
+    vim.defer_fn(function()
+      if M.current ~= current then return end
+      local result, err = require("review.util.gh").submit_review(
+        meta.owner, meta.repo, meta.number, payload, meta.repo_root)
+      if not result then util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR); return end
+      for i, root in ipairs(drafts) do
+        local remote = type(result.comments) == "table" and result.comments[i] or nil
+        current.store:update(root.id, {
+          status = "published", origin = "github",
+          github_id = remote and (remote.node_id or tostring(remote.id)) or root.github_id,
+        })
+      end
+      util.notify(string.format("Published %d review comment%s · %.1fs", #drafts,
+        #drafts == 1 and "" or "s", (vim.uv.hrtime() - started) / 1e9))
+      M.refresh()
+    end, 20)
   end)
 end
 

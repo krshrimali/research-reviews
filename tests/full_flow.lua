@@ -29,6 +29,9 @@ for _, b in ipairs(vim.api.nvim_list_bufs()) do
   end
 end
 check(found_overview, "overview opens on demand (show_overview)")
+-- Return to the review tab: Diffview views are tab-local, so asking for the
+-- "current" view from the overview tab correctly returns nil.
+vim.cmd("tabprevious")
 
 -- diffview opened.
 local opened = vim.wait(4000, function()

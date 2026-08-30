@@ -14,10 +14,10 @@ vim.api.nvim_create_user_command("Review", function(opts)
   review().open(arg)
 end, { nargs = "?", desc = "Open a PR/branch review" })
 
--- :ReviewList — fuzzy picker.
+-- :ReviewList — persistent review browser.
 vim.api.nvim_create_user_command("ReviewList", function()
   review().open_list()
-end, { desc = "Pick a PR/branch to review" })
+end, { desc = "Browse PRs/branches to review" })
 
 vim.api.nvim_create_user_command("ReviewPRs", function() review().open_pull_requests() end,
   { desc = "Pick a pull request to review" })

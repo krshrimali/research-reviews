@@ -1,6 +1,38 @@
 local list = require("review.ui.list")
 
 describe("review source quickfix", function()
+  it("renders a durable browser with active state and actionable rows", function()
+    local lines, map = list._browser_lines({
+      state = "merged", source = "both", query = "", loading = false, static = false,
+      items = { { label = "#42 durable browser", search = "42 durable" } },
+    })
+    assert.is_truthy(table.concat(lines, "\n"):find("[MERGED]", 1, true))
+    assert.equals("#42 durable browser", map[6].label)
+  end)
+
+  it("survives tab switching and opens the selected source with Enter", function()
+    local opened
+    list.open_browser(vim.fn.getcwd(), {
+      items = { { kind = "branch", arg = "feature/browser", label = "feature/browser", search = "feature" } },
+      branches_only = true, source_name = "branches",
+    }, function(item) opened = item end)
+    local browser_tab, browser_buf = vim.api.nvim_get_current_tabpage(), vim.api.nvim_get_current_buf()
+    vim.cmd("tabnew")
+    vim.cmd("tabprevious")
+    assert.equals(browser_tab, vim.api.nvim_get_current_tabpage())
+    assert.is_true(vim.api.nvim_buf_is_valid(browser_buf))
+    vim.api.nvim_win_set_cursor(0, { 6, 0 })
+    local enter
+    for _, keymap in ipairs(vim.api.nvim_buf_get_keymap(browser_buf, "n")) do
+      if keymap.lhs == "<CR>" then enter = keymap.callback end
+    end
+    assert.is_function(enter)
+    enter()
+    assert.equals("feature/browser", opened.arg)
+    vim.cmd("tabclose")
+    vim.cmd("tabclose")
+  end)
+
   it("cycles picker states in the documented order", function()
     assert.equals("closed", list._next_state("open"))
     assert.equals("merged", list._next_state("closed"))

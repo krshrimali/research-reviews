@@ -35,7 +35,7 @@ function M.import(source, store)
   local meta = source:metadata()
   local existing = by_github_id(store)
   local now = os.date("!%Y-%m-%dT%H:%M:%SZ")
-  local imported = 0
+  local imported, refreshed = 0, 0
 
   for _, t in ipairs(threads) do
     local nodes = (t.comments and t.comments.nodes) or {}
@@ -47,6 +47,7 @@ function M.import(source, store)
       local path = cm.path or t.path
       local prev = existing[gid]
       if prev then
+        refreshed = refreshed + 1
         -- Refresh upstream-authoritative fields only. Upstream can RESOLVE a thread,
         -- but a local resolve is never reverted by re-import (would lose user intent).
         prev.body = cm.body or prev.body
@@ -103,7 +104,7 @@ function M.import(source, store)
     end
   end
   store:save()
-  return imported
+  return imported, nil, refreshed
 end
 
 return M

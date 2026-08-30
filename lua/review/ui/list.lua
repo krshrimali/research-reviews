@@ -122,8 +122,169 @@ local function pr_item(pr)
       pr.reviewDecision and ("  " .. pr.reviewDecision) or ""),
     search = string.format("#%d %s %s %s", pr.number, pr.title,
       pr.author and pr.author.login or "", table.concat(labels, " ")),
+    raw = pr,
   }
 end
+
+-- A review source is durable navigation, not a transient completion operation.
+-- This browser is an ordinary nofile buffer, so changing tabs, using normal-mode
+-- motions, or leaving it open behind a Diffview never invalidates its callbacks.
+local browser_states = { "open", "closed", "merged", "all" }
+local browser_sources = { "both", "prs", "branches" }
+
+local function cycle(values, current)
+  for i, value in ipairs(values) do
+    if value == current then return values[(i % #values) + 1] end
+  end
+  return values[1]
+end
+
+local function browser_lines(model)
+  local active = {}
+  for _, value in ipairs(browser_states) do
+    active[#active + 1] = value == model.state and ("[" .. value:upper() .. "]") or value
+  end
+  local lines = {
+    "Review browser",
+    model.static and ("[" .. model.source:upper() .. "]") or table.concat(active, "  "),
+    string.format("Sources: %s%s", model.source, model.query ~= "" and ("  ·  Search: " .. model.query) or ""),
+    model.static and "/ search · Q quickfix · <CR> open · q close"
+      or "Tab state · S sources · / search · r refresh · Q quickfix · <CR> open · q close",
+    string.rep("─", 72),
+  }
+  local map = {}
+  if model.loading then
+    lines[#lines + 1] = (model.spinner or "⠋") .. " Loading pull requests…"
+  elseif model.error then
+    lines[#lines + 1] = "Error: " .. model.error
+    lines[#lines + 1] = "Press r to retry. Local sources remain available below."
+  end
+  local query = model.query:lower()
+  for _, item in ipairs(model.items) do
+    if query == "" or (item.search or item.label):lower():find(query, 1, true) then
+      lines[#lines + 1] = item.label
+      map[#lines] = item
+    end
+  end
+  if not model.loading and vim.tbl_isempty(map) then lines[#lines + 1] = "(no matching review sources)" end
+  return lines, map
+end
+
+M._browser_lines = browser_lines
+
+local function open_browser(cwd, opts, on_choose)
+  opts = opts or {}
+  local model = {
+    cwd = cwd, state = opts.state or picker_state(cwd).state or "open",
+    source = opts.source_name or (opts.prs_only and "prs" or opts.branches_only and "branches" or "both"),
+    query = "", items = {}, map = {}, generation = 0, static = opts.items ~= nil,
+  }
+  vim.cmd("tabnew")
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_win_set_buf(0, buf)
+  vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile = "nofile", "wipe", false
+  vim.bo[buf].filetype = "review-sources"
+  vim.api.nvim_buf_set_name(buf, "review://sources/" .. util.hash(cwd) .. "/" .. model.source)
+
+  local timer
+  local function render()
+    if not vim.api.nvim_buf_is_valid(buf) then return end
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    local lines, map = browser_lines(model)
+    model.map = map
+    vim.bo[buf].modifiable = true
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+    vim.bo[buf].modifiable = false
+    if vim.api.nvim_get_current_buf() == buf then
+      pcall(vim.api.nvim_win_set_cursor, 0, { math.min(cursor[1], #lines), 0 })
+    end
+  end
+  local function stop_spinner()
+    if timer then timer:stop(); timer:close(); timer = nil end
+  end
+  vim.api.nvim_create_autocmd("BufWipeout", { buffer = buf, once = true, callback = stop_spinner })
+
+  local function load(force)
+    local started = vim.uv.hrtime()
+    model.generation = model.generation + 1
+    local generation = model.generation
+    model.items, model.error = {}, nil
+    if opts.items then
+      vim.list_extend(model.items, opts.items)
+      model.loading = false; render(); return
+    end
+    if model.source ~= "prs" then vim.list_extend(model.items, local_branches(cwd)) end
+    if model.source == "branches" then model.loading = false; render(); return end
+    local cached = not force and cache_get(cwd, { state = model.state, search = "" }) or nil
+    if cached then
+      for _, pr in ipairs(cached) do model.items[#model.items + 1] = pr_item(pr) end
+      model.loading = false; render(); return
+    end
+    model.loading, model.spinner = true, "⠋"
+    util.notify(string.format("Loading %s pull requests…", model.state))
+    local frames, frame = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }, 1
+    stop_spinner()
+    timer = vim.uv.new_timer()
+    timer:start(0, 90, vim.schedule_wrap(function()
+      if not model.loading or not vim.api.nvim_buf_is_valid(buf) then stop_spinner(); return end
+      frame = frame % #frames + 1; model.spinner = frames[frame]; render()
+    end))
+    render()
+    local argv = { vim.env.PRTUI_GH_BIN or "gh" }
+    vim.list_extend(argv, gh.list_prs_args({ state = model.state, limit = 100 }))
+    vim.system(argv, { cwd = cwd, text = true }, function(result)
+      vim.schedule(function()
+        if generation ~= model.generation or not vim.api.nvim_buf_is_valid(buf) then return end
+        model.loading = false; stop_spinner()
+        if result.code ~= 0 then
+          model.error = vim.trim(result.stderr or "GitHub request failed")
+          util.notify("Pull request loading failed: " .. model.error, vim.log.levels.ERROR)
+        else
+          local ok, prs = pcall(vim.json.decode, result.stdout or "")
+          if not ok or not vim.islist(prs) then model.error = "GitHub returned invalid JSON"
+          else
+            cache_store(cache_key(cwd, { state = model.state, search = "" }), prs)
+            for _, pr in ipairs(prs) do model.items[#model.items + 1] = pr_item(pr) end
+            util.notify(string.format("Loaded %d %s pull request%s · %.1fs", #prs, model.state,
+              #prs == 1 and "" or "s", (vim.uv.hrtime() - started) / 1e9))
+          end
+        end
+        render()
+      end)
+    end)
+  end
+
+  local function map(lhs, fn, desc)
+    vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true, desc = desc })
+  end
+  map("<CR>", function()
+    local item = model.map[vim.api.nvim_win_get_cursor(0)[1]]
+    if item then on_choose(item) end
+  end, "open review")
+  map("<Tab>", function()
+    if model.static then return end
+    model.state = cycle(browser_states, model.state); save_picker_state(cwd, model); load(false)
+  end, "next PR state")
+  map("<S-Tab>", function()
+    if model.static then return end
+    for _ = 1, #browser_states - 1 do model.state = cycle(browser_states, model.state) end
+    save_picker_state(cwd, model); load(false)
+  end, "previous PR state")
+  map("S", function()
+    if not model.static then model.source = cycle(browser_sources, model.source); load(false) end
+  end, "cycle source type")
+  map("/", function()
+    vim.ui.input({ prompt = "Review search: ", default = model.query }, function(value)
+      if value ~= nil then model.query = vim.trim(value); render() end
+    end)
+  end, "search review sources")
+  map("r", function() load(true) end, "refresh review sources")
+  map("Q", function() M.to_quickfix(vim.tbl_values(model.map), cwd, on_choose) end, "send results to quickfix")
+  map("q", function() vim.cmd("tabclose") end, "close review browser")
+  load(false)
+end
+
+M.open_browser = open_browser
 
 local function pr_items(cwd, opts)
   if not gh.available() then
@@ -522,19 +683,19 @@ local function present_snacks_loading(cwd, opts, on_choose, snacks)
 end
 
 function M.open_prs(cwd, on_choose)
-  M.open(cwd, { prs_only = true }, on_choose)
+  open_browser(cwd, { prs_only = true }, on_choose)
 end
 
 function M.open_branches(cwd, on_choose)
   local items = local_branches(cwd)
   if #items == 0 then util.notify("no local branches found", vim.log.levels.WARN); return end
-  present_static(items, cwd, "review: pick local branch", on_choose)
+  open_browser(cwd, { branches_only = true, items = items, source_name = "branches" }, on_choose)
 end
 
 function M.open_commits(cwd, on_choose)
   local items = commit_items(cwd, config.get().commit_picker_limit)
   if #items == 0 then util.notify("no commits found", vim.log.levels.WARN); return end
-  present_static(items, cwd, "review: pick commit", on_choose)
+  open_browser(cwd, { items = items, branches_only = true, source_name = "commits" }, on_choose)
 end
 
 --- Open the picker.
@@ -548,6 +709,13 @@ function M.open(cwd, opts, on_choose)
     M.open_quickfix(cwd, on_choose)
     return
   end
+  if true then
+    open_browser(cwd, opts, on_choose)
+    return
+  end
+  -- Legacy picker implementation retained below for compatibility with callers that
+  -- may still depend on its helpers; the public browser no longer enters this path.
+  -- luacheck: ignore 511
   if not opts.state then opts.state = picker_state(cwd).state or "open" end
   save_picker_state(cwd, opts)
   local has_snacks, snacks = util.has("snacks")

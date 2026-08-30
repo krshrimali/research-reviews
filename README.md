@@ -33,15 +33,15 @@ private worktree under the reviewed repository's own `.git/prtui/worktrees` dire
 The default workspace keeps Diffview's file tree and diff visible alongside a responsive
 thread inbox. The inbox supports `/` search, `f` status filters, `Space` multi-select,
 `a` scoped Claude review, `I` GitHub import, `Q` quickfix export, and `p` draft publishing.
-In the PR/branch picker, select rows and press `<C-q>` to send them to quickfix;
+In the persistent review browser, press `Q` to send visible rows to quickfix;
 `<Enter>` on a quickfix row opens that PR or branch review.
 With no review open, `<leader>p` lists focused PR, local-branch, single-commit,
-current-branch, and combined pickers. The PR picker remembers its state per repository;
+current-branch, and combined browsers. The PR browser remembers its state per repository;
 `<Tab>` cycles open, closed, merged,
 and all PRs, while `r` bypasses the short metadata cache. `:ReviewHealth` diagnoses
 dependencies/configuration, `:ReviewProfile` shows recent command timings, and
 `:ReviewHelp` is the searchable in-editor key and workflow reference.
-Cold PR loads are asynchronous and show a picker spinner; the title always names the
+Cold PR loads are asynchronous and show an in-buffer spinner; the header always names the
 active OPEN/CLOSED/MERGED/ALL filter. GitHub thread import is idempotent and refreshes
 moved/outdated thread metadata and nested replies.
 Use `:ReviewSync` to recover the latest Claude findings from its exact transcript.

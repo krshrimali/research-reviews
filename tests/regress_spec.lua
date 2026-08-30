@@ -76,7 +76,10 @@ describe("github_sync preserves local resolution", function()
     }
     local sync = require("review.comments.github_sync")
     assert.equals(2, sync.import(fake, store))
-    assert.equals(0, sync.import(fake, store))
+    local reimported, import_err, refreshed = sync.import(fake, store)
+    assert.equals(0, reimported)
+    assert.is_nil(import_err)
+    assert.equals(2, refreshed)
     assert.equals(1, #store:all_threads())
     local root = store:all_threads()[1]
     assert.equals(1, #store:replies(root.id))
