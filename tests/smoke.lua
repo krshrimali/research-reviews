@@ -4,8 +4,10 @@ local mods = {
   "review.util.json", "review.util.git", "review.util.gh", "review.worktree",
   "review.source", "review.source.local_branch", "review.source.github_pr",
   "review.comments.anchor", "review.comments.store", "review.comments.github_sync",
-  "review.ui.markers", "review.ui.menu", "review.ui.compose", "review.ui.overview", "review.ui.diff",
-  "review.ui.comments_panel", "review.ui.list",
+  "review.ui.markers", "review.ui.menu", "review.ui.compose", "review.ui.diff",
+  "review.ui.comments_panel", "review.ui.list", "review.ui.workspace",
+  "review.ui.help", "review.ui.prompt", "review.ui.publish",
+  "review.perf", "review.health", "review.sidekick",
   "review.claude.contract", "review.claude.runner", "review.claude.session",
 }
 local ok_all = true

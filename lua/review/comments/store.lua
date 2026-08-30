@@ -30,6 +30,7 @@ function Store.for_source(source)
     sessions = doc.sessions or {},
     tombstones = doc.tombstones or {},
     viewed = (doc.meta and doc.meta.viewed) or {},
+    review = (doc.meta and doc.meta.review) or { event = "COMMENT", body = "" },
   }, Store)
   -- Defensively drop any tombstoned records that lingered on disk.
   for id in pairs(self.tombstones) do
@@ -46,12 +47,32 @@ function Store:save()
     comments = self.comments,
     sessions = self.sessions,
     tombstones = self.tombstones,
-    meta = { viewed = self.viewed },
+    meta = { viewed = self.viewed, review = self.review },
   })
   if not ok then
     util.notify("failed to persist comments: " .. tostring(err), vim.log.levels.ERROR)
   end
   return ok
+end
+
+--- The pending review submission (event + summary body). Persisted with the store so
+--- a summary drafted over several sittings survives restarts.
+---@return table { event=string, body=string }
+function Store:review_draft()
+  self.review = self.review or { event = "COMMENT", body = "" }
+  self.review.event = self.review.event or "COMMENT"
+  self.review.body = self.review.body or ""
+  return self.review
+end
+
+---@param fields table { event?=string, body?=string }
+function Store:set_review_draft(fields)
+  local draft = self:review_draft()
+  for key, value in pairs(fields or {}) do
+    draft[key] = value
+  end
+  self:save()
+  return draft
 end
 
 function Store:is_viewed(file)
@@ -68,6 +89,14 @@ function Store:viewed_progress()
   local files, viewed = self.source:files(), 0
   for _, file in ipairs(files) do if self:is_viewed(file.path) then viewed = viewed + 1 end end
   return viewed, #files
+end
+
+--- The status a non-resolved, non-outdated comment should carry. Anything with an
+--- upstream id is already published; only local-only records are drafts.
+---@param c table
+---@return string
+local function open_status(c)
+  return c.github_id and "published" or "draft"
 end
 
 --- Add a new root comment.
@@ -200,7 +229,7 @@ function Store:set_resolved(id, resolved)
   local root = self:root_of(id)
   for _, c in pairs(self.comments) do
     if c.id == root or c.in_reply_to == root then
-      c.status = resolved and "resolved" or "draft"
+      c.status = resolved and "resolved" or open_status(c)
       c.updated_at = os.date("!%Y-%m-%dT%H:%M:%SZ")
     end
   end
@@ -298,7 +327,7 @@ function Store:reanchor(rename_map)
           c.line_start = loc
           c.line_end = c.line_end + delta
           if c.status == "outdated" then
-            c.status = "draft"
+            c.status = open_status(c)
           end
         else
           c.status = "outdated"

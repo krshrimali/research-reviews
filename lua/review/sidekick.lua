@@ -6,6 +6,43 @@ local worktree = require("review.worktree")
 local M = {}
 M.pollers = {}
 
+-- The agent tool policy lives in review.claude.policy so both the Sidekick launch
+-- below and the headless runner enforce the same thing.
+local policy = require("review.claude.policy")
+
+M._tool_policy = policy
+
+--- Register (once per session) two review-specific Sidekick tools derived from the
+--- user's own `claude` tool, differing only by the tool allow/deny policy.
+--- Returns the tool name to launch, or "claude" if registration is not possible.
+---@param allow_edits boolean
+---@return string tool_name, boolean restricted
+function M.ensure_tool(allow_edits)
+  local mode = allow_edits and "edit" or "readonly"
+  local name = "review_" .. mode
+  local ok_cfg, cfg = pcall(require, "sidekick.config")
+  local ok_tool, tool = pcall(require, "sidekick.cli.tool")
+  if not ok_cfg or not ok_tool or type(cfg.cli) ~= "table" or type(cfg.cli.tools) ~= "table" then
+    return "claude", false
+  end
+  if cfg.cli.tools[name] then
+    return name, true
+  end
+  local ok_base, base = pcall(tool.get, "claude")
+  if not ok_base or not base or type(base.cmd) ~= "table" or #base.cmd == 0 then
+    return "claude", false
+  end
+  local allow, deny = policy.args(allow_edits)
+  local cmd = vim.deepcopy(base.cmd)
+  vim.list_extend(cmd, { "--allowedTools", allow, "--disallowedTools", deny })
+  cfg.cli.tools[name] = vim.tbl_extend("force", vim.deepcopy(base.config or {}), {
+    cmd = cmd,
+    -- The process still *is* claude, so reuse claude's process matcher.
+    is_proc = (base.config or {}).is_proc or "claude",
+  })
+  return name, true
+end
+
 ---Read the agent's exact persisted transcript instead of terminal cells. Terminal
 ---buffers contain display-width reflow and can therefore split/corrupt long JSON.
 ---@param source table
@@ -42,13 +79,28 @@ function M.transcript_result(source, cwd, model, opts)
   end
 end
 
+--- Threads to hand the agent. An explicit selection is honoured verbatim; a
+--- whole-review request excludes resolved threads, because the contract tells the
+--- agent to reply to EVERY thread it is given and a finished conversation does not
+--- need another reply.
+---@param store table
+---@param roots table[]|nil explicit selection
+---@return table[]
 local function roots_with_replies(store, roots)
-  local out = vim.deepcopy(roots or store:all_threads())
+  local selected = roots
+  if not selected then
+    selected = vim.tbl_filter(function(root)
+      return root.status ~= "resolved"
+    end, store:all_threads())
+  end
+  local out = vim.deepcopy(selected)
   for _, root in ipairs(out) do
     root.replies = vim.deepcopy(store:replies(root.id))
   end
   return out
 end
+
+M._roots_with_replies = roots_with_replies
 
 function M.prompt(source, store, opts)
   opts = opts or {}
@@ -115,9 +167,14 @@ function M.run(source, store, prompt, opts)
       return nil, err
     end
   end
-  local state = cli.start({ name = opts.tool or "claude", cwd = cwd, focus = opts.focus ~= false })
+  local tool_name, restricted = M.ensure_tool(opts.allow_edits)
+  local state = cli.start({ name = opts.tool or tool_name, cwd = cwd, focus = opts.focus ~= false })
   if not state or not state.session then
     return nil, "could not start Sidekick session"
+  end
+  if not restricted then
+    util.notify("agent tool policy could not be applied; this session is NOT restricted",
+      vim.log.levels.WARN)
   end
   local session = {
     id = id, source_key = source:key(), state = "running", progress = "Starting agent",
@@ -125,6 +182,7 @@ function M.run(source, store, prompt, opts)
     allow_edits = opts.allow_edits or false, auto_resolve = opts.auto_resolve or false,
     replied = {}, findings = {}, log = {}, applied = false,
     sidekick_id = state.session.id, backend = "sidekick", retry_prompt = prompt,
+    tool = tool_name, restricted = restricted,
     started_epoch = os.time(),
   }
   store.sessions[id] = session

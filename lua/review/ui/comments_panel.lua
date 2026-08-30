@@ -2,6 +2,10 @@
 --
 -- Lists comment threads for the current file (first chars shown). <CR> jumps to the
 -- thread's anchor in the diff and expands it inline.
+--
+-- Panel state is per TABPAGE. A review lives in its own tab, so a module-global
+-- panel meant a second review silently reused (and then closed) the first review's
+-- window in a different tab.
 
 local util = require("review.util")
 
@@ -12,13 +16,35 @@ M.ns = vim.api.nvim_create_namespace("review_panel")
 ---@class Panel
 ---@field buf integer
 ---@field win integer
+---@field tab integer
 ---@field store table
----@field file string
+---@field file string|nil   -- nil => whole review; set => this file only
 ---@field side string
+---@field scope string      -- "review" | "file"
 ---@field line_map table<integer, table>  -- line -> root comment
 ---@field on_jump fun(root:table)
 
-local state = nil
+---@type table<integer, Panel>
+local states = {}
+
+--- The panel belonging to a tabpage (default: the current one), if it is still alive.
+---@param tab integer|nil
+---@return Panel|nil
+local function get_state(tab)
+  tab = tab or vim.api.nvim_get_current_tabpage()
+  local st = states[tab]
+  if not st then
+    return nil
+  end
+  if not vim.api.nvim_win_is_valid(st.win) or not vim.api.nvim_buf_is_valid(st.buf) then
+    states[tab] = nil
+    return nil
+  end
+  return st
+end
+
+M._get_state = get_state
+M._states = states
 
 --- Build lines for the panel.
 ---@param store table
@@ -29,7 +55,7 @@ local filters = { "unresolved", "all", "claude", "draft", "outdated", "resolved"
 local function matches(root, filter, query)
   if filter == "unresolved" and root.status == "resolved" then return false end
   if filter == "claude" and root.origin ~= "claude" then return false end
-  if filter == "draft" and root.status ~= "draft" then return false end
+  if filter == "draft" and (root.status ~= "draft" or root.github_id) then return false end
   if filter == "outdated" and root.status ~= "outdated" then return false end
   if filter == "resolved" and root.status ~= "resolved" then return false end
   if query and query ~= "" then
@@ -49,34 +75,35 @@ local function add_body(lines, map, root, prefix, body)
   end
 end
 
-local function tree_insert(tree, root)
-  local parts = vim.split(root.file or "(unknown)", "/", { plain = true, trimempty = true })
-  local node = tree
-  for i = 1, math.max(0, #parts - 1) do
-    local part = parts[i]
-    node.dirs[part] = node.dirs[part] or { dirs = {}, files = {} }
-    node = node.dirs[part]
+--- Group threads by file, ordered by path. The panel is ~40 columns wide, so a
+--- nested directory tree spent most of its lines on chrome; one collapsed path row
+--- per file conveys the same structure in a single line.
+---@param threads table[]
+---@return table[] groups  { path=string, roots=table[] }
+local function group_by_file(threads)
+  local order, by_path = {}, {}
+  for _, root in ipairs(threads) do
+    local path = root.file or "(unknown)"
+    if not by_path[path] then
+      by_path[path] = {}
+      order[#order + 1] = path
+    end
+    table.insert(by_path[path], root)
   end
-  local file_name = parts[#parts] or "(unknown)"
-  node.files[file_name] = node.files[file_name] or {}
-  table.insert(node.files[file_name], root)
+  table.sort(order)
+  local groups = {}
+  for _, path in ipairs(order) do
+    groups[#groups + 1] = { path = path, roots = by_path[path] }
+  end
+  return groups
 end
 
-local function sorted_keys(tbl)
-  local keys = vim.tbl_keys(tbl)
-  table.sort(keys)
-  return keys
-end
+M._group_by_file = group_by_file
 
-local function render_tree(node, depth, lines, map, store, selected)
-  local indent = string.rep("  ", depth)
-  for _, dirname in ipairs(sorted_keys(node.dirs)) do
-    table.insert(lines, indent .. "▾ " .. dirname .. "/")
-    render_tree(node.dirs[dirname], depth + 1, lines, map, store, selected)
-  end
-  for _, filename in ipairs(sorted_keys(node.files)) do
-    table.insert(lines, indent .. "▾ " .. filename)
-    for _, root in ipairs(node.files[filename]) do
+local function render_groups(groups, lines, map, store, selected)
+  for _, group in ipairs(groups) do
+    table.insert(lines, "▾ " .. group.path)
+    for _, root in ipairs(group.roots) do
       local count = 1 + #store:replies(root.id)
       local icon = root.status == "resolved" and "✓"
         or (root.status == "outdated" and "⚠")
@@ -88,9 +115,10 @@ local function render_tree(node, depth, lines, map, store, selected)
       local suffix = count > 1 and string.format(" · %d messages", count) or ""
       if reaction_count > 0 then suffix = suffix .. " · ♥" .. reaction_count end
       if root.status == "outdated" then suffix = suffix .. " · OUTDATED" end
-      local prefix = indent .. "  "
-      table.insert(lines, string.format("%s%s %s @%s: %s%s", prefix, checked, icon,
-        root.author or "unknown", body[1] or "", suffix))
+      if root.kind == "suggestion" then suffix = suffix .. " · SUGGESTION" end
+      local prefix = "  "
+      table.insert(lines, string.format("%s%s %s L%d @%s: %s%s", prefix, checked, icon,
+        root.line_start or 0, root.author or "unknown", body[1] or "", suffix))
       map[#lines] = root
       add_body(lines, map, root, prefix .. "    ", root.body)
       if reaction_count > 0 then
@@ -109,16 +137,35 @@ local function render_tree(node, depth, lines, map, store, selected)
   end
 end
 
+--- Running-agent status, so the panel where findings will land also says one is coming.
+---@param store table
+---@return string|nil
+local function agent_status(store)
+  for _, session in pairs(store.sessions or {}) do
+    if session.state == "running" then
+      return string.format("★ agent %s · %s", (session.id or ""):sub(1, 8),
+        util.truncate(session.progress or "working", 30))
+    end
+  end
+  return nil
+end
+
+M._agent_status = agent_status
+
 local function build(store, file, filter, query, selected)
   local lines, map = {}, {}
   local all = file and store:threads_for_file(file) or store:all_threads()
   local open, drafts = 0, 0
   for _, root in ipairs(all) do
     if root.status ~= "resolved" then open = open + 1 end
-    if root.status == "draft" then drafts = drafts + 1 end
+    if root.status == "draft" and not root.github_id then drafts = drafts + 1 end
   end
-  table.insert(lines, string.format("Threads · %d open · %d drafts", open, drafts))
-  table.insert(lines, string.format("filter: %s%s", filter, query ~= "" and (" · /" .. query) or ""))
+  table.insert(lines, string.format("Threads · %d open · %d local draft%s", open, drafts,
+    drafts == 1 and "" or "s"))
+  table.insert(lines, string.format("scope: %s · filter: %s%s", file and "this file" or "review",
+    filter, query ~= "" and (" · /" .. query) or ""))
+  local agent = agent_status(store)
+  if agent then table.insert(lines, agent) end
   table.insert(lines, string.rep("─", 38))
   local threads = {}
   for _, root in ipairs(all) do if matches(root, filter, query) then threads[#threads + 1] = root end end
@@ -129,9 +176,7 @@ local function build(store, file, filter, query, selected)
   if #threads == 0 then
     table.insert(lines, "(no matching threads)")
   end
-  local tree = { dirs = {}, files = {} }
-  for _, root in ipairs(threads) do tree_insert(tree, root) end
-  render_tree(tree, 0, lines, map, store, selected)
+  render_groups(group_by_file(threads), lines, map, store, selected)
   local general = {}
   for _, session in pairs(store.sessions or {}) do
     for _, finding in ipairs(session.findings or {}) do
@@ -144,36 +189,55 @@ local function build(store, file, filter, query, selected)
   end
   table.insert(lines, "")
   table.insert(lines, "<CR> open · Space select · a ask Claude · p publish · I import")
-  table.insert(lines, "f filter · / search · Q quickfix · R reply · r resolve · e edit · d delete · y copy · q close")
+  table.insert(lines, "f filter · s scope · / search · Q quickfix · R reply · r resolve")
+  table.insert(lines, "A apply suggestion · e edit · d delete · y copy · z react · q close")
   return lines, map
 end
 
-
 M._build = build
 
---- Render/refresh the panel content.
----@param store table
----@param file string
----@param side string
-function M.render(store, file, side)
-  if not state or not vim.api.nvim_buf_is_valid(state.buf) then
+--- Render one panel's content from its own state.
+---@param st Panel
+local function render_state(st)
+  if not vim.api.nvim_buf_is_valid(st.buf) then
     return
   end
-  state.store, state.file, state.side = store, file, side
-  local lines, map = build(store, file, state.filter, state.query, state.selected)
-  state.line_map = map
-  vim.bo[state.buf].modifiable = true
-  vim.api.nvim_buf_set_lines(state.buf, 0, -1, false, lines)
-  vim.bo[state.buf].modifiable = false
+  local lines, map = build(st.store, st.file, st.filter, st.query, st.selected)
+  st.line_map = map
+  vim.bo[st.buf].modifiable = true
+  vim.api.nvim_buf_set_lines(st.buf, 0, -1, false, lines)
+  vim.bo[st.buf].modifiable = false
+end
+
+M._render_state = render_state
+
+--- Render/refresh the current tab's panel.
+---@param store table
+---@param file string|nil
+---@param side string
+function M.render(store, file, side)
+  local st = get_state()
+  if not st then
+    return
+  end
+  st.store, st.side = store, side
+  -- An explicit file argument updates what "this file" means; `nil` means "whatever
+  -- the panel already tracks", so a redraw never silently widens a scoped panel.
+  if file ~= nil then
+    st.scoped_file = file
+  end
+  st.file = st.scope == "file" and st.scoped_file or nil
+  render_state(st)
 end
 
 --- Open (or focus) the panel for a file.
 ---@param store table
----@param file string
+---@param file string|nil
 ---@param side string
 ---@param on_jump fun(root:table)
 function M.open(store, file, side, on_jump)
-  if state and vim.api.nvim_win_is_valid(state.win) then
+  local tab = vim.api.nvim_get_current_tabpage()
+  if get_state(tab) then
     M.render(store, file, side)
     return
   end
@@ -181,7 +245,7 @@ function M.open(store, file, side, on_jump)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].filetype = "review-comments"
-  vim.api.nvim_buf_set_name(buf, "review://comments-panel")
+  pcall(vim.api.nvim_buf_set_name, buf, "review://comments-panel/" .. tab)
 
   vim.cmd("botright vsplit")
   local win = vim.api.nvim_get_current_win()
@@ -190,129 +254,173 @@ function M.open(store, file, side, on_jump)
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
   vim.wo[win].wrap = true
+  vim.wo[win].cursorline = true
 
-  state = { buf = buf, win = win, store = store, file = file, side = side, line_map = {},
-    on_jump = on_jump, filter = "unresolved", query = "", selected = {} }
+  local st = {
+    buf = buf, win = win, tab = tab, store = store, file = nil, scoped_file = file,
+    side = side, scope = "review", line_map = {}, on_jump = on_jump,
+    filter = "unresolved", query = "", selected = {},
+  }
+  states[tab] = st
   pcall(vim.treesitter.start, buf, "markdown")
 
-  local function map(lhs, fn)
-    vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true })
+  vim.api.nvim_create_autocmd("BufWipeout", {
+    buffer = buf, once = true,
+    callback = function() states[tab] = nil end,
+  })
+
+  local function under_cursor()
+    return st.line_map[vim.api.nvim_win_get_cursor(0)[1]]
   end
+  local function selected_roots()
+    local roots = {}
+    for id in pairs(st.selected) do
+      local root = st.store:get(id)
+      if root then roots[#roots + 1] = root end
+    end
+    return roots
+  end
+  local function map(lhs, fn, desc)
+    vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true, desc = desc })
+  end
+
   map("<CR>", function()
-    local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if root and state.on_jump then
-      state.on_jump(root)
-    end
-  end)
+    local root = under_cursor()
+    if root and st.on_jump then st.on_jump(root) end
+  end, "jump to thread")
   map("r", function()
-    local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if root then
-      require("review").resolve_thread(root, function() M.refresh() end)
-    end
-  end)
+    local root = under_cursor()
+    if root then require("review").resolve_thread(root) end
+  end, "resolve / unresolve")
   map("R", function()
-    local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if root then require("review").reply_thread(root, function() M.refresh() end) end
-  end)
+    local root = under_cursor()
+    if root then require("review").reply_thread(root) end
+  end, "reply")
   map("<Space>", function()
-    local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if root then state.selected[root.id] = not state.selected[root.id] or nil; M.render(state.store, state.file, state.side) end
-  end)
+    local root = under_cursor()
+    if root then
+      st.selected[root.id] = not st.selected[root.id] or nil
+      render_state(st)
+    end
+  end, "select")
   map("f", function()
     local idx = 1
-    for i, value in ipairs(filters) do if value == state.filter then idx = i break end end
-    state.filter = filters[(idx % #filters) + 1]
-    M.render(state.store, state.file, state.side)
-  end)
-  map("/", function()
-    vim.ui.input({ prompt = "Filter threads: ", default = state.query }, function(value)
-      if value ~= nil then state.query = value; M.render(state.store, state.file, state.side) end
-    end)
-  end)
-  map("a", function()
-    local roots = {}
-    for id in pairs(state.selected) do local root = state.store:get(id); if root then roots[#roots + 1] = root end end
-    local under = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if #roots == 0 and under then roots = { under } end
-    if #roots > 0 then require("review").ask_claude_threads(roots) end
-  end)
-  map("p", function()
-    local roots = {}
-    for id in pairs(state.selected) do local root = state.store:get(id); if root then roots[#roots + 1] = root end end
-    if #roots == 0 then roots = state.store:all_threads() end
-    require("review").publish_threads(roots)
-  end)
-  map("z", function()
-    require("review").react_to_thread(state.line_map[vim.api.nvim_win_get_cursor(0)[1]])
-  end)
-  map("I", function() require("review").import_github_comments() end)
-  map("Q", function()
-    local roots = {}
-    for _, root in pairs(state.line_map) do roots[root.id] = root end
-    require("review").threads_to_quickfix(vim.tbl_values(roots))
-  end)
-  map("d", function()
-    local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if root and vim.fn.confirm("Delete this local thread?", "&Delete\n&Cancel", 2) == 1 then
-      state.store:delete(root.id)
-      M.render(state.store, state.file, state.side)
-    end
-  end)
-  map("e", function()
-    local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if root then
-      if root.github_id then
-        util.notify("Published GitHub comments cannot be edited locally", vim.log.levels.WARN)
+    for i, value in ipairs(filters) do if value == st.filter then idx = i break end end
+    st.filter = filters[(idx % #filters) + 1]
+    render_state(st)
+  end, "cycle filter")
+  map("s", function()
+    if st.scope == "review" then
+      local target = st.scoped_file
+      if not target then
+        local ctx = require("review.ui.diff").context()
+        target = ctx and ctx.file or nil
+      end
+      if not target then
+        util.notify("no file in the diff to scope to", vim.log.levels.INFO)
         return
       end
-      require("review.ui.compose").open({ title = "Edit thread", initial = root.body, on_submit = function(body)
-        state.store:update(root.id, { body = body }); M.render(state.store, state.file, state.side)
-      end })
+      st.scoped_file, st.scope, st.file = target, "file", target
+    else
+      st.scope, st.file = "review", nil
     end
-  end)
+    render_state(st)
+  end, "toggle scope: whole review / this file")
+  map("/", function()
+    vim.ui.input({ prompt = "Filter threads: ", default = st.query }, function(value)
+      if value ~= nil then st.query = value; render_state(st) end
+    end)
+  end, "search")
+  map("a", function()
+    local roots = selected_roots()
+    local under = under_cursor()
+    if #roots == 0 and under then roots = { under } end
+    if #roots > 0 then require("review").ask_claude_threads(roots) end
+  end, "ask Claude about threads")
+  map("p", function()
+    local roots = selected_roots()
+    if #roots == 0 then roots = st.store:all_threads() end
+    require("review").publish_threads(roots)
+  end, "publish drafts")
+  map("z", function() require("review").react_to_thread(under_cursor()) end, "react")
+  map("I", function() require("review").import_github_comments() end, "import GitHub comments")
+  map("A", function()
+    local root = under_cursor()
+    if root then require("review").apply_suggestion(root) end
+  end, "apply suggestion to the working tree")
+  map("Q", function()
+    local roots = {}
+    for _, root in pairs(st.line_map) do roots[root.id] = root end
+    require("review").threads_to_quickfix(vim.tbl_values(roots))
+  end, "export to quickfix")
+  map("d", function()
+    local root = under_cursor()
+    if not root then return end
+    require("review.ui.menu").confirm("Delete this local thread?", "Delete", function()
+      st.store:delete(root.id)
+      require("review").notify_change()
+    end)
+  end, "delete thread")
+  map("e", function()
+    local root = under_cursor()
+    if not root then return end
+    if root.github_id then
+      util.notify("Published GitHub comments cannot be edited locally", vim.log.levels.WARN)
+      return
+    end
+    require("review.ui.compose").open({ title = "Edit thread", initial = root.body, on_submit = function(body)
+      st.store:update(root.id, { body = body })
+      require("review").notify_change()
+    end })
+  end, "edit thread")
   map("y", function()
-    local root = state.line_map[vim.api.nvim_win_get_cursor(0)[1]]
-    if root then
-      local out = { string.format("%s:%d", root.file, root.line_start or 0), root.body }
-      for _, reply in ipairs(state.store:replies(root.id)) do out[#out + 1] = string.format("%s: %s", reply.author, reply.body) end
-      local value = table.concat(out, "\n")
-      vim.fn.setreg("+", value); vim.fn.setreg('"', value); util.notify("thread copied")
+    local root = under_cursor()
+    if not root then return end
+    local out = { string.format("%s:%d", root.file, root.line_start or 0), root.body }
+    for _, reply in ipairs(st.store:replies(root.id)) do
+      out[#out + 1] = string.format("%s: %s", reply.author, reply.body)
     end
-  end)
-  map("q", M.close)
+    local value = table.concat(out, "\n")
+    vim.fn.setreg("+", value); vim.fn.setreg('"', value); util.notify("thread copied")
+  end, "copy thread")
+  map("q", M.close, "close panel")
 
-  M.render(store, file, side)
+  render_state(st)
 end
 
+--- Re-render the current tab's panel from its own store.
 function M.refresh()
-  if state then M.render(state.store, state.file, state.side) end
+  local st = get_state()
+  if st then render_state(st) end
 end
 
---- Close the panel.
+--- Close the current tab's panel.
 function M.close()
-  if state and vim.api.nvim_win_is_valid(state.win) then
-    vim.api.nvim_win_close(state.win, true)
+  local tab = vim.api.nvim_get_current_tabpage()
+  local st = states[tab]
+  if st and vim.api.nvim_win_is_valid(st.win) then
+    vim.api.nvim_win_close(st.win, true)
   end
-  state = nil
+  states[tab] = nil
 end
 
 --- Toggle the panel.
 ---@param store table
----@param file string
+---@param file string|nil
 ---@param side string
 ---@param on_jump fun(root:table)
 function M.toggle(store, file, side, on_jump)
-  if state and vim.api.nvim_win_is_valid(state.win) then
+  if get_state() then
     M.close()
   else
     M.open(store, file, side, on_jump)
   end
 end
 
---- True if the panel is open.
+--- True if the CURRENT tab has a live panel.
 ---@return boolean
 function M.is_open()
-  return state ~= nil and vim.api.nvim_win_is_valid(state.win)
+  return get_state() ~= nil
 end
 
 return M

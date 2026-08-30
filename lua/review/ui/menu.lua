@@ -88,4 +88,20 @@ function M.open(items, opts)
   end, { buffer = buf, nowait = true })
 end
 
+--- Confirm a destructive action without blocking the editor.
+---
+--- `vim.fn.confirm` freezes the whole UI on a modal prompt and cannot be driven by
+--- the same recognition-over-recall model as the rest of the plugin, so destructive
+--- actions reuse this float instead. Cancel is the default: `q`/`<Esc>` just close.
+---@param question string
+---@param verb string   the affirmative label, e.g. "Delete"
+---@param on_confirm fun()
+function M.confirm(question, verb, on_confirm)
+  local key = verb:sub(1, 1):lower()
+  M.open({
+    { key = key, label = verb, fn = on_confirm },
+    { key = "c", label = "Cancel", fn = function() end },
+  }, { title = question })
+end
+
 return M

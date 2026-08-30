@@ -63,6 +63,14 @@ vim.api.nvim_create_user_command("ReviewSync", function() later(function(r) r.sy
   { desc = "Import the latest Claude findings from its transcript" })
 vim.api.nvim_create_user_command("ReviewQuickfix", function() review().threads_to_quickfix() end,
   { desc = "Export review threads to quickfix" })
+vim.api.nvim_create_user_command("ReviewPublish", function() review().publish_threads() end,
+  { desc = "Preview and submit a GitHub review (verdict, summary, drafts)" })
+
+-- :ReviewBase [<target>] — open a review after choosing the base to diff against.
+vim.api.nvim_create_user_command("ReviewBase", function(opts)
+  local arg = opts.args ~= "" and opts.args or nil
+  later(function(r) r.open_with_base(arg) end)
+end, { nargs = "?", desc = "Open a review against a chosen base ref" })
 
 -- :ReviewClean — prune managed worktrees (keeps unpushed ones).
 vim.api.nvim_create_user_command("ReviewClean", function()

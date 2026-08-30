@@ -101,10 +101,32 @@ function M._attach_diff_buffer(bufnr)
     { buffer = bufnr, desc = "review: previous unresolved thread" })
   pcall(vim.keymap.set, "n", "<localleader>v", M.toggle_viewed,
     { buffer = bufnr, desc = "review: toggle file viewed" })
-  pcall(vim.keymap.set, "n", "o", function() M.open_at_commit(false) end,
+  -- `o`/`O` are Vim's open-line-below/above. In a working-tree diff the right-hand
+  -- buffer is the real file, so shadowing them replaced two reflexive editing keys
+  -- with something else entirely; the reviewed-commit action lives on `go`/`gO`.
+  pcall(vim.keymap.set, "n", "go", function() M.open_at_commit(false) end,
     { buffer = bufnr, desc = "review: open file at reviewed commit" })
-  pcall(vim.keymap.set, "n", "O", function() M.open_at_commit(true) end,
+  pcall(vim.keymap.set, "n", "gO", function() M.open_at_commit(true) end,
     { buffer = bufnr, desc = "review: open file at reviewed commit in new tab" })
+
+  -- The keys the expanded-thread footer advertises. Buffer-local and thread-aware:
+  -- with no thread under the cursor they fall through to their normal meaning.
+  local function on_thread(fn, fallback)
+    return function()
+      local ctx = diff.context()
+      local root = ctx and markers.thread_at_cursor(store, ctx.file, ctx.side, ctx.line)
+      if root then return fn(root) end
+      if fallback then
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(fallback, true, false, true), "n", false)
+      end
+    end
+  end
+  pcall(vim.keymap.set, "n", "R", on_thread(function(root) M.reply_thread(root) end, nil),
+    { buffer = bufnr, nowait = true, desc = "review: reply to thread here" })
+  pcall(vim.keymap.set, "n", "gr", on_thread(function(root) M.resolve_thread(root) end, nil),
+    { buffer = bufnr, nowait = true, desc = "review: resolve thread here" })
+  pcall(vim.keymap.set, "n", "gd", on_thread(function() M.delete_at_cursor() end, nil),
+    { buffer = bufnr, nowait = true, desc = "review: delete thread here" })
   for i, mode in ipairs({ "Conversation", "Timeline", "Claude", "Comments" }) do
     pcall(vim.keymap.set, "n", "g" .. i, function() M.open_workspace(mode) end,
       { buffer = bufnr, desc = "review: " .. mode .. " view" })
@@ -128,6 +150,54 @@ local function ctx_or_warn()
   return ctx
 end
 
+--- One place every mutation announces itself.
+---
+--- Markers, the winbar, the comments panel and the Diffview bridge each used to be
+--- refreshed by whichever call site remembered to; adding a comment refreshed the
+--- gutter but not the panel, marking a file viewed refreshed neither. Route every
+--- change through here instead.
+function M.notify_change()
+  if not M.current then return end
+  local ok_diff, diff = pcall(require, "review.ui.diff")
+  if ok_diff then diff.refresh_markers(M.current.store) end
+  local ok_panel, panel = pcall(require, "review.ui.comments_panel")
+  if ok_panel and panel.is_open() then panel.refresh() end
+  sync_diffview_github_comments(M.current, 0)
+end
+
+--- Focus the window in the current tab whose diff buffer matches `side`, so the very
+--- next keypress (`<CR>` to expand, `<leader>p` for actions) acts on the thread the
+--- caller just navigated to. Diffview's own jump leaves the cursor in the LEFT pane
+--- regardless of the requested side.
+---@param side string|nil "LEFT"|"RIGHT"
+local function focus_side(side)
+  local ok, diff = pcall(require, "review.ui.diff")
+  if not ok then return end
+  local want = side == "LEFT" and "LEFT" or "RIGHT"
+  for _, win in ipairs(vim.api.nvim_tabpage_list_wins(0)) do
+    local ctx = diff.buffer_context(vim.api.nvim_win_get_buf(win))
+    if ctx and ctx.side == want then
+      vim.api.nvim_set_current_win(win)
+      return
+    end
+  end
+end
+
+M._focus_side = focus_side
+
+--- Jump to a thread's anchor AND land in the pane that actually holds its marker.
+---@param root table
+function M.jump_to_thread(root)
+  if not root then return end
+  local ok, dv = pcall(require, "diffview")
+  if not ok or not dv.open_review_location then return end
+  dv.open_review_location({ path = root.file, side = root.side, line = root.line_start })
+  vim.schedule(function()
+    focus_side(root.side)
+    if M.current then require("review.ui.diff").refresh_markers(M.current.store) end
+  end)
+end
+
 --- Reply to the thread under the cursor.
 function M.reply_thread(root, on_done)
   local compose = require("review.ui.compose")
@@ -148,10 +218,7 @@ function M.reply_thread(root, on_done)
           util.notify("reply kept as draft: " .. tostring(err), vim.log.levels.WARN)
         end
       end
-      require("review.ui.diff").refresh_markers(M.current.store)
-      if require("review.ui.comments_panel").is_open() then
-        require("review.ui.comments_panel").refresh()
-      end
+      M.notify_change()
       if on_done then on_done(reply) end
     end,
   })
@@ -181,8 +248,16 @@ function M.resolve_thread(root, on_done)
     end
     util.notify(string.format("GitHub thread %s · %.1fs", resolved and "resolved" or "reopened",
       (vim.uv.hrtime() - started) / 1e9))
+  else
+    -- Local sources have no upstream to report on, but silence made resolving feel
+    -- like nothing happened unless the sign was already on screen.
+    local open = 0
+    for _, other in ipairs(M.current.store:all_threads()) do
+      if other.status ~= "resolved" then open = open + 1 end
+    end
+    util.notify(string.format("thread %s · %d open", resolved and "resolved" or "reopened", open))
   end
-  require("review.ui.diff").refresh_markers(M.current.store)
+  M.notify_change()
   if on_done then on_done(root) end
   return true
 end
@@ -212,10 +287,10 @@ function M.delete_at_cursor()
   if not root then
     return
   end
-  if vim.fn.confirm("Delete this thread?", "&Yes\n&No", 2) == 1 then
+  require("review.ui.menu").confirm("Delete this thread?", "Delete", function()
     M.current.store:delete(root.id)
-    require("review.ui.diff").refresh_markers(M.current.store)
-  end
+    M.notify_change()
+  end)
 end
 
 --- Open the current diff file at the source head in a worktree tab.
@@ -233,6 +308,7 @@ function M.toggle_viewed()
   if not ctx then return end
   local now = M.current.store:set_viewed(ctx.file, not M.current.store:is_viewed(ctx.file))
   local viewed, total = M.current.store:viewed_progress()
+  M.notify_change()
   util.notify(string.format("%s · %d/%d files reviewed", now and "marked viewed" or "marked unread", viewed, total))
 end
 
@@ -250,8 +326,7 @@ function M.navigate_thread(delta, unresolved_only)
     if ctx and root.file == ctx.file and (root.line_start or 0) >= (ctx.line or 0) then idx = i; break end
   end
   idx = ((idx - 1 + delta) % #roots) + 1
-  local root = roots[idx]
-  require("diffview").open_review_location({ path = root.file, side = root.side, line = root.line_start })
+  M.jump_to_thread(roots[idx])
 end
 
 --- Toggle the comments side-panel for the current file.
@@ -260,14 +335,12 @@ function M.toggle_comments_panel(force_open)
   local panel = require("review.ui.comments_panel")
   local ctx = diff.context()
   local side = ctx and ctx.side or "RIGHT"
-  local function jump(root)
-    local ok, dv = pcall(require, "diffview")
-    if ok and dv.open_review_location then
-      dv.open_review_location({ path = root.file, side = root.side, line = root.line_start })
-    end
-    diff.refresh_markers(M.current.store)
+  local file = ctx and ctx.file or nil
+  if force_open then
+    panel.open(M.current.store, file, side, M.jump_to_thread)
+  else
+    panel.toggle(M.current.store, file, side, M.jump_to_thread)
   end
-  if force_open then panel.open(M.current.store, nil, side, jump) else panel.toggle(M.current.store, nil, side, jump) end
 end
 
 --- Add a comment (or suggestion) on the current line/selection.
@@ -326,8 +399,12 @@ function M.menu()
 
   local diff = require("review.ui.diff")
   local markers = require("review.ui.markers")
-  local ft = vim.bo.filetype
   local items = {}
+  -- The menu is the whole discovery model, so it must not list actions that this
+  -- source cannot perform: offering "Import GitHub comments" on a local commit only
+  -- to answer "requires a PR" teaches users to distrust the menu.
+  local caps = M.current.source:caps()
+  local is_pr = M.current.source:kind() == "pr"
 
   local ctx = diff.context()
   if ctx then
@@ -345,31 +422,46 @@ function M.menu()
       items[#items + 1] = { key = "y", label = "Copy thread", fn = M.copy_thread_at_cursor }
       items[#items + 1] = { key = "A", label = "Ask Claude about this thread", fn = M.ask_claude_at_cursor }
       items[#items + 1] = { key = "z", label = "React to thread", fn = function() M.react_to_thread(thread) end }
+      if thread.kind == "suggestion" or (thread.body or ""):find("```suggestion", 1, true) then
+        items[#items + 1] = { key = "!", label = "Apply this suggestion to the working tree",
+          fn = function() M.apply_suggestion(thread) end }
+      end
     end
+    items[#items + 1] = {
+      key = "v",
+      label = M.current.store:is_viewed(ctx.file) and "Mark file unread" or "Mark file viewed",
+      fn = M.toggle_viewed,
+    }
     items[#items + 1] = { key = "o", label = "Open file @ commit (worktree)", fn = M.open_at_commit }
-  elseif ft == "review-overview" then
-    -- Overview-specific hints (the buffer-local <CR>/s/<Tab> still work directly).
-    items[#items + 1] = { key = "<CR>", label = "Open commit under cursor (also <CR>)", fn = function()
-      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<CR>", true, false, true), "m", false)
-    end }
   end
 
-  -- Review-level actions, always available.
+  -- Review-level actions.
   items[#items + 1] = { sep = "review" }
   items[#items + 1] = { key = "C", label = "Claude review (async)…", fn = M.claude_review }
   items[#items + 1] = { key = "a", label = "Open/toggle agent chat", fn = M.toggle_chat }
   items[#items + 1] = { key = "Y", label = "Edit, copy, or run final prompt", fn = M.copy_prompt }
-  items[#items + 1] = { key = "f", label = "Refresh PR and comments", fn = M.refresh }
-  items[#items + 1] = { key = "i", label = "Import GitHub comments", fn = M.import_github_comments }
   items[#items + 1] = { key = "S", label = "Sync latest Claude findings", fn = M.sync_claude_result }
-  items[#items + 1] = { key = "Q", label = "Export threads to quickfix", fn = M.threads_to_quickfix }
   items[#items + 1] = { key = "R", label = "Claude review sessions", fn = M.claude_sessions }
+  items[#items + 1] = {
+    key = "f",
+    label = is_pr and "Refresh PR, checks, and comments" or "Refresh commits and files",
+    fn = M.refresh,
+  }
+  if caps.has_threads then
+    items[#items + 1] = { key = "i", label = "Import GitHub comments", fn = M.import_github_comments }
+  end
+  if caps.can_submit then
+    items[#items + 1] = { key = "p", label = "Publish review (verdict + drafts)…",
+      fn = function() M.publish_threads() end }
+  end
+  items[#items + 1] = { key = "Q", label = "Export threads to quickfix", fn = M.threads_to_quickfix }
   items[#items + 1] = { key = "O", label = "Review workspace (Conversation / Timeline / Claude / Comments / Diff)", fn = M.show_overview }
   items[#items + 1] = { key = "P", label = "Toggle comments panel", fn = M.toggle_comments_panel }
   items[#items + 1] = { key = "L", label = "Choose another review target", fn = M.choose_source }
+  items[#items + 1] = { key = "W", label = "Prune review worktrees", fn = M.clean }
   items[#items + 1] = { key = "?", label = "Help and key reference", fn = M.help }
 
-  menu.open(items, { title = "Review · " .. M.current.source:title() })
+  menu.open(items, { title = "Review · " .. util.truncate(M.current.source:title(), 48) })
 end
 
 function M.choose_source()
@@ -390,19 +482,23 @@ end
 --- Open a review for a source argument (PR number/url, branch, or ".").
 ---@param arg string|integer|table|nil
 ---@param opts table|nil { base=string }
-function M.open(arg, opts)
-  opts = vim.tbl_extend("force", { base = config.get().local_base }, opts or {})
-  local started = vim.uv.hrtime()
-  util.progress("Opening review and loading repository metadata…")
-  local Source = require("review.source")
-  local source, err = Source.create(arg, opts.cwd or vim.fn.getcwd(), opts)
-  if not source then
-    util.notify("cannot open review: " .. tostring(err), vim.log.levels.ERROR)
-    return
-  end
+--- Finish opening a review once its Source exists.
+---@param source table
+---@param started integer  hrtime at the start of the open
+local function realize_review(source, started)
   local Store = require("review.comments.store")
   local store = Store.for_source(source)
   store:reanchor(rename_map(source))
+
+  local files = source:files()
+  if #files == 0 then
+    -- An empty review used to open two blank panes with no explanation at all.
+    local hint = source:kind() == "branch"
+      and " — the branch matches its base. Uncommitted work is not part of a branch review."
+      or ""
+    util.notify("Nothing to review in " .. source:title() .. hint, vim.log.levels.WARN)
+    return
+  end
 
   if config.get().workspace.dedicated_tab then vim.cmd("tabnew") end
   M.current = { source = source, store = store }
@@ -417,7 +513,7 @@ function M.open(arg, opts)
     if import_err then util.notify("GitHub comments were not imported: " .. tostring(import_err), vim.log.levels.WARN) end
   end
 
-  -- The diff is the ONE default surface (diffview + inline comments). The overview
+  -- The diff is the ONE default surface (diffview + inline comments). The workspace
   -- tab and comments panel are opt-in via the menu (<leader>p → O / P).
   require("review.ui.diff").open(source)
   vim.defer_fn(function() sync_diffview_github_comments(M.current, 0) end, 50)
@@ -428,9 +524,76 @@ function M.open(arg, opts)
     end)
   end
 
-  util.notify(string.format("Review opened · %s · %d comments (%d new, %d updated from GitHub) · %.1fs · <leader>p for actions",
-    source:title(), vim.tbl_count(store.comments), imported or 0, refreshed or 0,
+  util.notify(string.format("Review opened · %s · %d files · %d comments (%d new, %d updated) · %.1fs · <leader>p for actions",
+    source:title(), #files, vim.tbl_count(store.comments), imported or 0, refreshed or 0,
     (vim.uv.hrtime() - started) / 1e9))
+end
+
+M._realize_review = realize_review
+
+--- Open a review for a source argument (PR number/url, branch, or ".").
+---@param arg string|integer|table|nil
+---@param opts table|nil { base=string, cwd=string }
+function M.open(arg, opts)
+  opts = vim.tbl_extend("force", { base = config.get().local_base }, opts or {})
+  local started = vim.uv.hrtime()
+  local cwd = opts.cwd or vim.fn.getcwd()
+  local Source = require("review.source")
+
+  -- Building a PR Source shells out to `gh pr view` and `git fetch`, which on a cold
+  -- cache blocked the editor for tens of seconds with no feedback. Yield first so the
+  -- progress notice actually paints, and animate while the work runs.
+  local heavy = type(arg) == "number" or (type(arg) == "string" and arg:match("%d"))
+  if not heavy then
+    util.progress("Opening review…")
+    local source, err = Source.create(arg, cwd, opts)
+    if not source then
+      util.notify("cannot open review: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    realize_review(source, started)
+    return
+  end
+
+  local spinner = util.spinner("Fetching pull request metadata and refs…")
+  vim.defer_fn(function()
+    local source, err = Source.create(arg, cwd, opts)
+    spinner.stop()
+    if not source then
+      util.notify("cannot open review: " .. tostring(err), vim.log.levels.ERROR)
+      return
+    end
+    realize_review(source, started)
+  end, 30)
+end
+
+--- Open a review after asking which base to diff against (branch sources only).
+---@param arg string|integer|table|nil
+function M.open_with_base(arg)
+  local cwd = vim.fn.getcwd()
+  local git = require("review.util.git")
+  local choices = { "auto (merge-base with " .. git.default_branch(cwd) .. ")" }
+  local refs = {}
+  local ok, out = require("review.util.proc").git(
+    { "for-each-ref", "--format=%(refname:short)", "refs/heads/", "refs/remotes/" }, cwd)
+  if ok then
+    for name in vim.gsplit(out, "\n", { trimempty = true }) do
+      if not name:match("/HEAD$") then refs[#refs + 1] = name end
+    end
+  end
+  table.sort(refs)
+  vim.list_extend(choices, refs)
+  table.insert(choices, 2, "Enter a ref…")
+  vim.ui.select(choices, { prompt = "Diff against which base?" }, function(choice)
+    if not choice then return end
+    if choice == "Enter a ref…" then
+      vim.ui.input({ prompt = "Base ref: " }, function(value)
+        if value and value ~= "" then M.open(arg, { base = value }) end
+      end)
+      return
+    end
+    M.open(arg, { base = choice:match("^auto") and "auto" or choice })
+  end)
 end
 
 --- Open the fuzzy source picker.
@@ -578,7 +741,7 @@ function M.threads_to_quickfix(threads)
     local thread = item and item.user_data and item.user_data.review_thread
     if thread then
       vim.cmd("cclose")
-      require("diffview").open_review_location({ path = thread.file, side = thread.side, line = thread.line_start })
+      M.jump_to_thread(thread)
     end
   end, { buffer = qfbuf, desc = "open review thread in diff" })
 end
@@ -635,56 +798,176 @@ function M.publish_threads(threads)
   if not M.current or M.current.source:kind() ~= "pr" then
     util.notify("publishing requires a GitHub PR", vim.log.levels.WARN); return
   end
+  local store = M.current.store
   local drafts = vim.tbl_filter(function(root)
     return root.status == "draft" and not root.github_id and not root.in_reply_to
-  end, threads or M.current.store:all_threads())
-  if #drafts == 0 then util.notify("no publishable drafts", vim.log.levels.INFO); return end
+  end, threads or store:all_threads())
+  local review = store:review_draft()
+  if #drafts == 0 and vim.trim(review.body or "") == "" and (review.event or "COMMENT") == "COMMENT" then
+    util.notify("nothing to publish: no drafts, no summary, no verdict", vim.log.levels.INFO)
+    return
+  end
   local comments = {}
   for _, root in ipairs(drafts) do
-    comments[#comments + 1] = { path = root.file, line = root.line_end or root.line_start,
-      side = root.side or "RIGHT", body = root.body }
+    local first = root.line_start or 1
+    local last = root.line_end or first
+    local side = root.side or "RIGHT"
+    local comment = { path = root.file, line = math.max(first, last), side = side, body = root.body }
+    -- GitHub anchors a multi-line comment with start_line/start_side; without them a
+    -- deliberate 10-15 line selection silently posted on line 15 alone.
+    if last > first then
+      comment.start_line = first
+      comment.start_side = side
+    end
+    comments[#comments + 1] = comment
   end
   local src, meta = M.current.source, M.current.source:metadata()
   local payload = {
-    commit_id = src:head_rev(), event = "COMMENT", body = "Review submitted from review.nvim", comments = comments,
+    commit_id = src:head_rev(),
+    event = review.event or "COMMENT",
+    body = review.body or "",
+    comments = comments,
   }
   require("review.ui.publish").open(payload, drafts, function()
     local current, started = M.current, vim.uv.hrtime()
-    util.progress(string.format("Publishing %d review comment%s to GitHub…",
-      #drafts, #drafts == 1 and "" or "s"))
+    util.progress(string.format("Publishing %s with %d comment%s…",
+      payload.event, #drafts, #drafts == 1 and "" or "s"))
     vim.defer_fn(function()
       if M.current ~= current then return end
       local result, err = require("review.util.gh").submit_review(
         meta.owner, meta.repo, meta.number, payload, meta.repo_root)
       if not result then util.notify("publish failed: " .. tostring(err), vim.log.levels.ERROR); return end
-      for i, root in ipairs(drafts) do
-        local remote = type(result.comments) == "table" and result.comments[i] or nil
+      -- Match responses by LOCATION, not array position: GitHub does not promise the
+      -- response preserves request order, and an off-by-one there attaches a remote
+      -- id to the wrong local thread, which then misroutes replies and resolves.
+      local remaining = {}
+      for _, remote in ipairs(type(result.comments) == "table" and result.comments or {}) do
+        local key = string.format("%s:%s:%s", remote.path or "",
+          tostring(remote.line or remote.original_line or ""), remote.side or "RIGHT")
+        remaining[key] = remaining[key] or {}
+        table.insert(remaining[key], remote)
+      end
+      local matched = 0
+      for _, root in ipairs(drafts) do
+        local key = string.format("%s:%s:%s", root.file,
+          tostring(root.line_end or root.line_start), root.side or "RIGHT")
+        local bucket = remaining[key]
+        local remote = bucket and table.remove(bucket, 1) or nil
+        if remote then matched = matched + 1 end
         current.store:update(root.id, {
           status = "published", origin = "github",
           github_id = remote and (remote.node_id or tostring(remote.id)) or root.github_id,
         })
       end
-      util.notify(string.format("Published %d review comment%s · %.1fs", #drafts,
-        #drafts == 1 and "" or "s", (vim.uv.hrtime() - started) / 1e9))
+      -- The submission is spent; the next review starts from a clean summary.
+      current.store:set_review_draft({ event = "COMMENT", body = "" })
+      local unmatched = #drafts - matched
+      util.notify(string.format("Published %s · %d comment%s%s · %.1fs", payload.event, #drafts,
+        #drafts == 1 and "" or "s",
+        unmatched > 0 and (" · " .. unmatched .. " could not be matched back") or "",
+        (vim.uv.hrtime() - started) / 1e9),
+        unmatched > 0 and vim.log.levels.WARN or nil)
       M.refresh()
     end, 20)
-  end)
+  end, {
+    on_change = function(updated)
+      store:set_review_draft({ event = updated.event, body = updated.body })
+    end,
+  })
 end
 
+--- Write a thread's suggestion into the working tree.
+---
+--- Suggestions could be authored and rendered but never applied, so an incoming
+--- ```suggestion block was read-only advice. Writes to the working tree only; the
+--- reviewed revision itself is never touched.
+---@param root table
+function M.apply_suggestion(root)
+  if not M.current or not root then return end
+  local text = root.suggestion_text
+  if not text or text == "" then
+    -- GitHub carries suggestions inside the comment body, not a dedicated field.
+    text = (root.body or ""):match("```suggestion%s*\n(.-)```")
+  end
+  if not text or vim.trim(text) == "" then
+    util.notify("this thread has no suggestion to apply", vim.log.levels.INFO); return
+  end
+  if root.side == "LEFT" then
+    util.notify("suggestions apply to the new side only", vim.log.levels.WARN); return
+  end
+  local meta = M.current.source:metadata()
+  local path = vim.fs.joinpath(meta.repo_root, root.file)
+  if vim.fn.filereadable(path) == 0 then
+    util.notify("file is not in the working tree: " .. root.file, vim.log.levels.WARN); return
+  end
+  local first = root.line_start or 1
+  local last = root.line_end or first
+  local replacement = vim.split(text:gsub("\n$", ""), "\n", { plain = true })
+  require("review.ui.menu").confirm(
+    string.format("Apply suggestion to %s:%d-%d?", root.file, first, last), "Apply", function()
+      local lines = vim.fn.readfile(path)
+      if last > #lines then
+        util.notify("the file has changed; suggestion range is out of bounds", vim.log.levels.ERROR)
+        return
+      end
+      local out = {}
+      vim.list_extend(out, lines, 1, first - 1)
+      vim.list_extend(out, replacement)
+      vim.list_extend(out, lines, last + 1, #lines)
+      vim.fn.writefile(out, path)
+      vim.cmd("checktime")
+      util.notify(string.format("applied suggestion to %s:%d-%d", root.file, first, last))
+    end)
+end
+
+--- GitHub's ReactionContent enum, with the glyph a human actually recognises.
+M.reactions = {
+  { content = "THUMBS_UP", emoji = "\u{1F44D}", label = "thumbs up" },
+  { content = "THUMBS_DOWN", emoji = "\u{1F44E}", label = "thumbs down" },
+  { content = "LAUGH", emoji = "\u{1F604}", label = "laugh" },
+  { content = "HOORAY", emoji = "\u{1F389}", label = "hooray" },
+  { content = "CONFUSED", emoji = "\u{1F615}", label = "confused" },
+  { content = "HEART", emoji = "\u{2764}", label = "heart" },
+  { content = "ROCKET", emoji = "\u{1F680}", label = "rocket" },
+  { content = "EYES", emoji = "\u{1F440}", label = "eyes" },
+}
+
+--- Add or REMOVE a reaction. This used to only ever increment, so pressing the key
+--- twice invented a second reaction from the same person that GitHub would never
+--- record; the picker also showed raw enum names and no current state.
+---@param root table
 function M.react_to_thread(root)
   if not root then return end
-  local choices = { "THUMBS_UP", "THUMBS_DOWN", "LAUGH", "HOORAY", "CONFUSED", "HEART", "ROCKET", "EYES" }
-  vim.ui.select(choices, { prompt = "React to thread:" }, function(reaction)
-    if not reaction then return end
+  local current = root.reactions or {}
+  local items = {}
+  for _, entry in ipairs(M.reactions) do
+    local count = current[entry.content] or 0
+    items[#items + 1] = vim.tbl_extend("force", entry, { count = count, mine = count > 0 })
+  end
+  vim.ui.select(items, {
+    prompt = "React to thread (again to remove):",
+    format_item = function(item)
+      return string.format("%s %s%s", item.emoji, item.label,
+        item.count > 0 and string.format("  · %d %s", item.count, "\u{2713}") or "")
+    end,
+  }, function(choice)
+    if not choice then return end
+    local add = not choice.mine
     if root.github_id then
-      local ok, err = require("review.util.gh").react(root.github_id, reaction, true,
+      local ok, err = require("review.util.gh").react(root.github_id, choice.content, add,
         M.current.source:metadata().repo_root)
       if not ok then util.notify("reaction failed: " .. tostring(err), vim.log.levels.ERROR); return end
     end
-    root.reactions = root.reactions or {}
-    root.reactions[reaction] = (root.reactions[reaction] or 0) + 1
-    M.current.store:update(root.id, { reactions = root.reactions })
-    require("review.ui.diff").refresh_markers(M.current.store)
+    local reactions = vim.deepcopy(current)
+    if add then
+      reactions[choice.content] = (reactions[choice.content] or 0) + 1
+    else
+      reactions[choice.content] = nil
+    end
+    root.reactions = reactions
+    M.current.store:update(root.id, { reactions = reactions })
+    M.notify_change()
+    util.notify(string.format("%s %s %s", add and "reacted" or "removed", choice.emoji, choice.label))
   end)
 end
 
@@ -696,6 +979,8 @@ function M.claude_review()
   end
   local cfg = config.get().claude
   local names = vim.tbl_keys(cfg.saved_instructions or {})
+  table.sort(names) -- pairs() order is arbitrary; a menu that reorders itself
+                    -- between invocations never builds muscle memory
   table.insert(names, 1, "(none)")
   table.insert(names, 2, "Custom instructions…")
   vim.ui.select(names, { prompt = "Saved instruction profile:" }, function(choice)

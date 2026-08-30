@@ -37,6 +37,45 @@ local function header(lines, st)
   lines[#lines + 1] = "1–5 switch views · ] next view · <leader>pc / <leader>rC Claude review · <leader>p actions · q close"
   lines[#lines + 1] = st.source:title()
   lines[#lines + 1] = ("@%s · updated %s"):format(st.source:author(), util.relative_time(st.source:updated_at()))
+
+  -- The state a reviewer needs before deciding whether to start: verdict so far, who
+  -- else is on it, and whether CI is even green. The Source has always exposed these;
+  -- the workspace simply never rendered them.
+  local caps = st.source:caps()
+  local meta = st.source:metadata()
+  if caps.can_submit then
+    local decision = st.source.review_decision and st.source:review_decision() or nil
+    if decision == nil or decision == vim.NIL or decision == "" then decision = "REVIEW REQUIRED" end
+    local branches = meta.head_ref and (" · %s → %s"):format(meta.head_ref, meta.base_ref or "base") or ""
+    lines[#lines + 1] = ("decision: %s%s"):format(decision, branches)
+  end
+  if caps.has_reviewers then
+    local reviewers = st.source:reviewers()
+    lines[#lines + 1] = ("reviewers: %s"):format(#reviewers > 0 and table.concat(reviewers, ", ") or "none requested")
+  end
+  if caps.has_checks then
+    local checks = st.source:checks()
+    if #checks > 0 then
+      local passing, failing = 0, {}
+      for _, check in ipairs(checks) do
+        local state = tostring(check.state or ""):upper()
+        if state == "SUCCESS" or state == "COMPLETED" or state == "NEUTRAL" then
+          passing = passing + 1
+        elseif state ~= "" and state ~= "PENDING" and state ~= "IN_PROGRESS" and state ~= "QUEUED" then
+          failing[#failing + 1] = check.name
+        end
+      end
+      lines[#lines + 1] = ("checks: %d/%d passing%s"):format(passing, #checks,
+        #failing > 0 and (" · failing: " .. table.concat(failing, ", ")) or "")
+    else
+      lines[#lines + 1] = "checks: none reported"
+    end
+  end
+  local labels = {}
+  for _, label in ipairs(meta.labels or {}) do labels[#labels + 1] = label.name or tostring(label) end
+  if #labels > 0 then lines[#lines + 1] = ("labels: %s"):format(table.concat(labels, ", ")) end
+  local viewed, total = st.store:viewed_progress()
+  if total > 0 then lines[#lines + 1] = ("files: %d/%d viewed"):format(viewed, total) end
   lines[#lines + 1] = ""
 end
 
@@ -77,9 +116,14 @@ end
 
 local function timeline(lines, st)
   lines[#lines + 1] = "## Timeline"
+  lines[#lines + 1] = "<CR> on a commit opens its diff in a new tab."
   local events = {}
   for _, c in ipairs(st.source:commits()) do
-    events[#events + 1] = { at = c.date or c.authored_at or "", text = ("commit %s · %s · @%s"):format(c.short, c.subject, c.author or "?") }
+    events[#events + 1] = {
+      at = c.date or c.authored_at or "",
+      text = ("commit %s · %s · @%s"):format(c.short, c.subject, c.author or "?"),
+      commit = c.sha,
+    }
   end
   for _, item in ipairs(st.source.conversation and st.source:conversation() or {}) do
     events[#events + 1] = { at = item.created_at or "", text = ("%s · @%s"):format(item.kind, item.author), body = item.body }
@@ -89,8 +133,10 @@ local function timeline(lines, st)
       root.author, root.file, root.line_start or 1, root.status == "outdated" and " · OUTDATED" or ""), body = root.body }
   end
   table.sort(events, function(a, b) return a.at < b.at end)
+  st.line_actions = {}
   for _, event in ipairs(events) do
     lines[#lines + 1] = ("- %s · %s"):format(event.at ~= "" and event.at or "unknown time", event.text)
+    if event.commit then st.line_actions[#lines] = { type = "commit", sha = event.commit } end
     if event.body and event.body ~= "" then body(lines, event.body, "    ") end
   end
 end
@@ -133,8 +179,19 @@ end
 
 local renderers = { Conversation = conversation, Timeline = timeline, Claude = claude, Comments = comments }
 
+local function footer(lines, st)
+  lines[#lines + 1] = ""
+  lines[#lines + 1] = string.rep("─", math.min(100, vim.o.columns - 4))
+  lines[#lines + 1] = "1-4 switch view · 5 back to the diff · ] next view · q close"
+  if st.mode == "Comments" then
+    lines[#lines + 1] = "<CR> open the thread under the cursor in the diff"
+  elseif st.mode == "Timeline" then
+    lines[#lines + 1] = "<CR> open the commit under the cursor in a new tab"
+  end
+end
+
 local function render(st)
-  local lines = {}; header(lines, st); renderers[st.mode](lines, st)
+  local lines = {}; header(lines, st); renderers[st.mode](lines, st); footer(lines, st)
   vim.bo[st.buf].modifiable = true
   vim.api.nvim_buf_set_lines(st.buf, 0, -1, false, lines)
   vim.bo[st.buf].modifiable = false
@@ -192,7 +249,13 @@ function M.open(source, store, mode)
     { buffer = buf, nowait = true })
   vim.keymap.set("n", "q", "<cmd>tabclose<cr>", { buffer = buf, nowait = true })
   vim.keymap.set("n", "<CR>", function()
-    local root = st.mode == "Comments" and st.line_map and st.line_map[vim.api.nvim_win_get_cursor(0)[1]] or nil
+    local lnum = vim.api.nvim_win_get_cursor(0)[1]
+    local action = st.mode == "Timeline" and st.line_actions and st.line_actions[lnum] or nil
+    if action and action.type == "commit" then
+      require("review.ui.diff").open_commit(st.source, action.sha)
+      return
+    end
+    local root = st.mode == "Comments" and st.line_map and st.line_map[lnum] or nil
     if not root then return end
     if root.status == "outdated" then
       util.notify("Outdated thread has no current diff anchor; its original location remains in Comments")
@@ -200,9 +263,11 @@ function M.open(source, store, mode)
     end
     vim.cmd("tabclose")
     vim.schedule(function()
-      require("diffview").open_review_location({ path = root.file, side = root.side, line = root.line_start })
+      -- Route through review.jump_to_thread so the cursor lands in the pane that
+      -- actually holds the marker, not whichever side Diffview focuses by default.
+      require("review").jump_to_thread(root)
     end)
-  end, { buffer = buf, nowait = true, desc = "Open comment on diff" })
+  end, { buffer = buf, nowait = true, desc = "Open the commit or thread under the cursor" })
   render(st); pcall(vim.treesitter.start, buf, "markdown")
   return st
 end

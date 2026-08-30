@@ -22,7 +22,7 @@ function M.run(argv, opts)
     :wait(opts.timeout or 30000)
   local out = res.stdout or ""
   local err = res.stderr or ""
-  require("review.perf").record("process", table.concat(argv, " ", 1, math.min(#argv, 3)),
+  require("review.perf").record("process", require("review.perf").label(argv),
     (vim.uv.hrtime() - started) / 1e6, res.code == 0)
   return res.code == 0, out, err, res.code
 end
@@ -67,7 +67,7 @@ function M.spawn(argv, opts, on_exit)
     stdout = stdout_cb,
   }, function(res)
     vim.schedule(function()
-      require("review.perf").record("process", table.concat(argv, " ", 1, math.min(#argv, 3)),
+      require("review.perf").record("process", require("review.perf").label(argv),
         (vim.uv.hrtime() - started) / 1e6, res.code == 0)
       on_exit(res.code == 0, res.stdout or "", res.stderr or "", res.code)
     end)

@@ -1,4 +1,4 @@
--- UI-layer integration tests (headless): overview, markers, panel, worktree.
+-- UI-layer integration tests (headless): workspace, markers, panel, worktree.
 local fixture = require("tests.fixture")
 
 local function new_source()
@@ -9,39 +9,34 @@ local function new_source()
   return dir, source, store
 end
 
-describe("overview render", function()
+describe("workspace render", function()
   it("normalizes CRLF and GitHub HTML", function()
     local util = require("review.util")
     assert.equals("See [docs](https://example.test)\nnext & `x`",
       util.normalize_markdown('See <a href="https://example.test">docs</a>\r\nnext &amp; <code>x</code>'))
   end)
 
-  it("renders title, commits, and description", function()
-    local _, source = new_source()
-    local overview = require("review.ui.overview")
-    local st = overview.open(source, function() end)
-    local lines = vim.api.nvim_buf_get_lines(st.buf, 0, -1, false)
-    local text = table.concat(lines, "\n")
-    assert.is_truthy(text:find("local branch"))
-    assert.is_truthy(text:find("Commits"))
-    assert.is_truthy(text:find("add refresh"))
-    -- commit rows carry actions
+  it("renders title, metadata, and an actionable commit timeline", function()
+    local _, source, store = new_source()
+    local st = require("review.ui.workspace").open(source, store, "Timeline")
+    local text = table.concat(vim.api.nvim_buf_get_lines(st.buf, 0, -1, false), "\n")
+    assert.is_truthy(text:find("local branch", 1, true))
+    assert.is_truthy(text:find("Timeline", 1, true))
+    assert.is_truthy(text:find("add refresh", 1, true))
+    assert.is_truthy(text:find("files: ", 1, true))
     local has_commit_action = false
-    for _, a in pairs(st.line_actions) do
-      if a.type == "commit" then
-        has_commit_action = true
-      end
+    for _, action in pairs(st.line_actions or {}) do
+      if action.type == "commit" then has_commit_action = true end
     end
     assert.is_true(has_commit_action)
   end)
 
-  it("toggles sort order", function()
-    local _, source = new_source()
-    local st = require("review.ui.overview").open(source, function() end)
-    st.sort_desc = false
-    require("review.ui.overview").render(st)
+  it("switches views and always shows the key legend", function()
+    local _, source, store = new_source()
+    local st = require("review.ui.workspace").open(source, store, "Conversation")
     local text = table.concat(vim.api.nvim_buf_get_lines(st.buf, 0, -1, false), "\n")
-    assert.is_truthy(text:find("old→recent"))
+    assert.is_truthy(text:find("1-4 switch view", 1, true))
+    assert.is_truthy(text:find("Description", 1, true))
   end)
 end)
 
@@ -121,9 +116,10 @@ describe("review progress", function()
     local panel = require("review.ui.comments_panel")
     panel.open(store, nil, "RIGHT", function() end)
     local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
-    assert.is_truthy(text:find("▾ src/", 1, true))
-    assert.is_truthy(text:find("▾ auth.lua", 1, true))
-    assert.is_truthy(text:find("▾ cache.cpp", 1, true))
+    -- One collapsed path row per file: a 42-column panel cannot afford to spend a
+    -- line on every directory segment.
+    assert.is_truthy(text:find("▾ src/auth.lua", 1, true))
+    assert.is_truthy(text:find("▾ src/cache.cpp", 1, true))
     assert.is_truthy(text:find("Space select", 1, true))
     assert.is_truthy(text:find("quickfix", 1, true))
     local called = false
@@ -143,7 +139,7 @@ describe("review progress", function()
   end)
 
 
-  it("nests directories, files, comments, and replies", function()
+  it("collapses the path, and renders comments and replies", function()
     local _, _, store = new_source()
     local root = store:add({
       file = "src/pointer/cursor/Manager.cpp", side = "RIGHT", line_start = 2,
@@ -152,11 +148,9 @@ describe("review progress", function()
     store:reply(root.id, "Agreed\nI will update it", { author = "claude", origin = "claude" })
     local lines = require("review.ui.comments_panel")._build(store, nil, "all", "", {})
     local text = table.concat(lines, "\n")
-    assert.is_truthy(text:find("▾ src/", 1, true))
-    assert.is_truthy(text:find("▾ pointer/", 1, true))
-    assert.is_truthy(text:find("▾ cursor/", 1, true))
-    assert.is_truthy(text:find("▾ Manager.cpp", 1, true))
+    assert.is_truthy(text:find("▾ src/pointer/cursor/Manager.cpp", 1, true))
     assert.is_truthy(text:find("@alice: Please guard this", 1, true))
+    assert.is_truthy(text:find("L2 @alice", 1, true))
     assert.is_truthy(text:find("↳ @claude: Agreed", 1, true))
     assert.is_truthy(text:find("```cpp", 1, true))
   end)

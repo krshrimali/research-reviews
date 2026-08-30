@@ -132,6 +132,20 @@ end
 local browser_states = { "open", "closed", "merged", "all" }
 local browser_sources = { "both", "prs", "branches" }
 
+--- Drop rows that do not belong in the requested state.
+---
+--- `gh pr list --state closed` includes merged PRs, so a CLOSED tab sitting next to
+--- a MERGED tab listed the same rows twice and neither label meant anything.
+---@param prs table[]
+---@param state string
+---@return table[]
+local function filter_state(prs, state)
+  if state ~= "closed" then return prs end
+  return vim.tbl_filter(function(pr)
+    return tostring(pr.state or ""):upper() ~= "MERGED"
+  end, prs)
+end
+
 local function cycle(values, current)
   for i, value in ipairs(values) do
     if value == current then return values[(i % #values) + 1] end
@@ -178,6 +192,7 @@ local function browser_lines(model)
 end
 
 M._browser_lines = browser_lines
+M._filter_state = filter_state
 
 local function open_browser(cwd, opts, on_choose)
   opts = opts or {}
@@ -194,6 +209,7 @@ local function open_browser(cwd, opts, on_choose)
   vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile = "nofile", "wipe", false
   vim.bo[buf].filetype = "review-sources"
   vim.wo.wrap, vim.wo.linebreak = false, false
+  vim.wo.cursorline = true
   vim.api.nvim_buf_set_name(buf, "review://sources/" .. util.hash(cwd) .. "/" .. model.source)
 
   local timer
@@ -210,8 +226,15 @@ local function open_browser(cwd, opts, on_choose)
     vim.bo[buf].modifiable = true
     vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
     vim.bo[buf].modifiable = false
+    -- Land on the first RESULT row, never the title: <CR> on the header was a
+    -- silent no-op, and a search left the cursor above its own results.
+    local first_row = #lines
+    for lnum in pairs(map) do first_row = math.min(first_row, lnum) end
+    if vim.tbl_isempty(map) then first_row = math.min(#lines, 6) end
     if vim.api.nvim_get_current_buf() == buf then
-      pcall(vim.api.nvim_win_set_cursor, 0, { math.min(cursor[1], #lines), 0 })
+      local want = math.max(first_row, math.min(cursor[1], #lines))
+      if not map[want] and not vim.tbl_isempty(map) then want = first_row end
+      pcall(vim.api.nvim_win_set_cursor, 0, { want, 0 })
     end
   end
   local function stop_spinner()
@@ -236,7 +259,9 @@ local function open_browser(cwd, opts, on_choose)
     if model.source == "branches" then model.loading = false; render(); return end
     local cached = not force and cache_get(cwd, { state = model.state, search = "" }) or nil
     if cached then
-      for _, pr in ipairs(cached) do model.items[#model.items + 1] = pr_item(pr) end
+      for _, pr in ipairs(filter_state(cached, model.state)) do
+        model.items[#model.items + 1] = pr_item(pr)
+      end
       model.loading = false; render(); return
     end
     model.loading, model.spinner = true, "⠋"
@@ -263,9 +288,10 @@ local function open_browser(cwd, opts, on_choose)
           if not ok or not vim.islist(prs) then model.error = "GitHub returned invalid JSON"
           else
             cache_store(cache_key(cwd, { state = model.state, search = "" }), prs)
-            for _, pr in ipairs(prs) do model.items[#model.items + 1] = pr_item(pr) end
-            util.notify(string.format("Loaded %d %s pull request%s · %.1fs", #prs, model.state,
-              #prs == 1 and "" or "s", (vim.uv.hrtime() - started) / 1e9))
+            local shown = filter_state(prs, model.state)
+            for _, pr in ipairs(shown) do model.items[#model.items + 1] = pr_item(pr) end
+            util.notify(string.format("Loaded %d %s pull request%s · %.1fs", #shown, model.state,
+              #shown == 1 and "" or "s", (vim.uv.hrtime() - started) / 1e9))
           end
         end
         render()
@@ -290,7 +316,15 @@ local function open_browser(cwd, opts, on_choose)
     load(false)
   end, "previous PR state")
   map("S", function()
-    if not model.static then model.source = cycle(browser_sources, model.source); load(false) end
+    -- :ReviewPRs / :ReviewBranches open a deliberately scoped browser; letting S
+    -- wander out of that scope also left the PR state tabs displayed above a list
+    -- of local branches, where they mean nothing.
+    if model.static or opts.prs_only or opts.branches_only then
+      util.notify("this browser is scoped; use :ReviewList for PRs and branches together",
+        vim.log.levels.INFO)
+      return
+    end
+    model.source = cycle(browser_sources, model.source); load(false)
   end, "cycle source type")
   map("/", function()
     vim.ui.input({ prompt = "Review search: ", default = model.query }, function(value)

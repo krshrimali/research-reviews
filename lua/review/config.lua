@@ -31,13 +31,10 @@ M.defaults = {
 
   -- Minimal keymap surface: ONE key opens a contextual action menu; the menu
   -- teaches everything else (recognition over recall). `primary` is the fast-path
-  -- action on the current line. The two overview-local keys stay because they're
-  -- intuitive in that read-only buffer.
+  -- action on the current line.
   keymaps = {
     menu = "<leader>p", -- the one key to remember (global + inside reviews)
     primary = "<CR>", -- expand thread / open commit under cursor
-    sort_commits = "s", -- overview buffer-local
-    unfold_commit = "<Tab>", -- overview buffer-local
   },
 
   claude = {

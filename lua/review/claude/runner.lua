@@ -16,22 +16,8 @@ local M = {}
 -- Track live jobs so we can kill them on VimLeavePre (R5).
 M.jobs = {}
 
--- Read-only tool allowlist. The full diff is already in the prompt, so we deliberately
--- do NOT grant `git diff`/`git show` here: `git diff --output=<path>` and `--ext-diff`
--- are file-write / command-exec vectors that would break read-only (security H1).
--- Claude Bash patterns are prefix globs, so subcommands need a `:*` suffix.
-local READONLY_TOOLS = { "Read", "Grep", "Glob", "Bash(git log:*)" }
---- Additional tools when edits are permitted — explicit subcommands, never a git wildcard.
-local EDIT_TOOLS = {
-  "Edit", "Write", "MultiEdit",
-  "Bash(git add:*)", "Bash(git commit:*)", "Bash(git status:*)",
-  "Bash(git diff:*)", "Bash(git worktree:*)",
-}
---- Always denied — belt-and-suspenders against push / history rewrite (security H1).
-local DENY_TOOLS = {
-  "Bash(git push:*)", "Bash(git push)",
-  "Bash(git reset:*)", "Bash(git rebase:*)",
-}
+-- One shared policy for every backend (see review.claude.policy).
+local policy = require("review.claude.policy")
 
 --- Apply a parsed findings table to the store. Idempotent per session.
 ---@param store table
@@ -168,10 +154,7 @@ function M.start(opts)
   end
 
   -- Build argv.
-  local tools = vim.deepcopy(READONLY_TOOLS)
-  if opts.allow_edits then
-    vim.list_extend(tools, EDIT_TOOLS)
-  end
+  local tools, denied = policy.for_mode(opts.allow_edits)
   local argv = {
     cfg.bin, "-p",
     "--output-format", "stream-json",
@@ -179,7 +162,7 @@ function M.start(opts)
     "--session-id", session_id,
     "--append-system-prompt", contract.system_prompt(),
     "--allowedTools", table.concat(tools, ","),
-    "--disallowedTools", table.concat(DENY_TOOLS, ","),
+    "--disallowedTools", table.concat(denied, ","),
     -- Never auto-accept anything not explicitly allowed above.
     "--permission-mode", opts.allow_edits and "acceptEdits" or "default",
   }

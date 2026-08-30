@@ -1,5 +1,29 @@
 local M = { records = {}, max_records = 200 }
 
+--- A readable, bounded label for an argv.
+---
+--- Truncating to the first three arguments made every `git diff --numstat <a> <b>`
+--- row identical, so a profile with eleven of them could not tell you which one was
+--- slow. Keep the whole command, shortening long revs to their short form.
+---@param argv string[]
+---@return string
+function M.label(argv)
+  local parts = {}
+  for _, arg in ipairs(argv or {}) do
+    arg = tostring(arg)
+    if arg:match("^%x%x%x%x%x%x%x%x%x+$") then
+      arg = arg:sub(1, 8)
+    elseif arg:match("^%x+%.%.%.%x+$") then
+      arg = arg:gsub("(%x%x%x%x%x%x%x%x)%x*", "%1")
+    elseif #arg > 40 then
+      arg = arg:sub(1, 37) .. "…"
+    end
+    parts[#parts + 1] = arg
+  end
+  local label = table.concat(parts, " ")
+  return #label > 110 and (label:sub(1, 107) .. "…") or label
+end
+
 function M.record(kind, label, elapsed_ms, ok)
   M.records[#M.records + 1] = {
     at = os.date("%H:%M:%S"), kind = kind, label = label,
@@ -9,8 +33,23 @@ function M.record(kind, label, elapsed_ms, ok)
 end
 
 function M.report()
-  local lines = { "# review.nvim performance", "", "Most recent operations first.", "",
-    "| time | operation | duration | result |", "|---|---|---:|---|" }
+  local total, slowest, failures = 0, nil, 0
+  for _, r in ipairs(M.records) do
+    total = total + (r.elapsed_ms or 0)
+    if not slowest or (r.elapsed_ms or 0) > (slowest.elapsed_ms or 0) then slowest = r end
+    if r.ok == false then failures = failures + 1 end
+  end
+  local lines = { "# review.nvim performance", "" }
+  if #M.records > 0 then
+    lines[#lines + 1] = ("%d operations · %.0f ms total · %.1f ms average · %d failed"):format(
+      #M.records, total, total / #M.records, failures)
+    if slowest then
+      lines[#lines + 1] = ("slowest: `%s` at %.1f ms"):format(slowest.label, slowest.elapsed_ms)
+    end
+    lines[#lines + 1] = ""
+  end
+  vim.list_extend(lines, { "Most recent operations first.", "",
+    "| time | operation | duration | result |", "|---|---|---:|---|" })
   for i = #M.records, 1, -1 do
     local r = M.records[i]
     lines[#lines + 1] = ("| %s | `%s` | %.1f ms | %s |"):format(

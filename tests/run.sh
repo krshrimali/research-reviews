@@ -4,7 +4,10 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 
 INIT=tests/minimal_init.lua
-SPECS=(anchor_spec source_spec contract_spec runner_spec ui_spec compose_spec regress_spec menu_spec list_spec)
+# Discover specs instead of listing them: health_spec, help_spec, publish_spec and
+# perf_spec all passed but were absent from the hand-maintained list, so a
+# regression in any of them would have shipped green.
+mapfile -t SPECS < <(cd tests && ls *_spec.lua | sed 's/\.lua$//' | sort)
 fail=0
 
 for s in "${SPECS[@]}"; do
@@ -17,10 +20,10 @@ for s in "${SPECS[@]}"; do
   fi
 done
 
-for standalone in full_flow features; do
+for standalone in smoke full_flow features; do
   echo "=== $standalone (standalone) ==="
   out=$(nvim --headless -i NONE -u "$INIT" -l "tests/$standalone.lua" 2>&1 | grep -vE "devicons|nvim.log")
-  echo "$out" | grep -E "ok |FAIL|PASSED|FAILED"
+  echo "$out" | grep -E "ok |FAIL|PASSED|FAILED|LOADED OK"
   if echo "$out" | grep -q "FAILED"; then fail=1; fi
 done
 

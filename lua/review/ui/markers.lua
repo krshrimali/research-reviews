@@ -54,7 +54,10 @@ local function thread_virt_lines(store, root)
       add("  │ " .. bodyline)
     end
   end
-  add("  ╰─ <CR> collapse  r resolve  d delete  R reply", "NonText")
+  -- Only advertise keys that are actually bound on a diff buffer (see
+  -- init._attach_diff_buffer). The old footer promised bare `r`/`d`, which in a diff
+  -- buffer are Vim's replace-char and delete operators.
+  add("  ╰─ <CR> collapse · R reply · gr resolve · gd delete · <leader>p actions", "NonText")
   return lines
 end
 

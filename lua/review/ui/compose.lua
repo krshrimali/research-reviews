@@ -21,7 +21,8 @@ function M.open(opts)
   vim.api.nvim_buf_set_name(buf, "review://compose/" .. util.uuid():sub(1, 8))
 
   local header = {}
-  table.insert(header, "<!-- " .. (opts.title or "Comment") .. " — write below; :w or <CR><CR> to submit -->")
+  table.insert(header, "<!-- " .. (opts.title or "Comment")
+    .. " — write below; :w or <CR><CR> submits, q discards -->")
   if opts.seed then
     table.insert(header, "<!-- context:")
     for _, l in ipairs(opts.seed) do
@@ -31,7 +32,12 @@ function M.open(opts)
   end
   local body_start = #header + 1
   if opts.suggestion then
-    vim.list_extend(header, { "```suggestion", "", "```" })
+    -- Pre-fill the fence with the selected source, the way GitHub does: a suggestion
+    -- is an edit of those exact lines, so retyping them by hand is pure friction.
+    local seeded = { "```suggestion" }
+    vim.list_extend(seeded, opts.seed and vim.deepcopy(opts.seed) or { "" })
+    table.insert(seeded, "```")
+    vim.list_extend(header, seeded)
   else
     if opts.initial then
       vim.list_extend(header, vim.split(opts.initial, "\n", { plain = true }))
@@ -45,8 +51,16 @@ function M.open(opts)
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
   vim.api.nvim_win_set_height(win, math.max(8, math.floor(vim.o.lines * 0.25)))
-  vim.api.nvim_win_set_cursor(win, { math.min(body_start + 1, vim.api.nvim_buf_line_count(buf)), 0 })
-  vim.cmd("startinsert")
+  -- Land where the writing continues: inside the fence for a suggestion, at the END
+  -- of an existing body when editing (typing at line 1 col 1 used to prepend).
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  local cursor_line = math.min(body_start + 1, line_count)
+  if opts.initial and not opts.suggestion then
+    cursor_line = line_count
+  end
+  local cursor_col = #(vim.api.nvim_buf_get_lines(buf, cursor_line - 1, cursor_line, false)[1] or "")
+  vim.api.nvim_win_set_cursor(win, { cursor_line, cursor_col })
+  vim.cmd("startinsert!")
 
   local submitted = false
   local function submit()
@@ -94,8 +108,21 @@ function M.open(opts)
     end
   end
 
+  --- Discard without submitting. The buffer is `acwrite` and modified, so plain `:q`
+  --- fails with E37 and leaves a blocking hit-enter prompt — there was no way out
+  --- short of knowing `:q!`.
+  local function discard()
+    submitted = true -- prevent a queued BufWriteCmd from firing after the close
+    vim.bo[buf].modified = false
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    util.notify("comment discarded", vim.log.levels.INFO)
+  end
+
   vim.keymap.set("n", "<CR><CR>", submit, { buffer = buf, desc = "submit review comment" })
   vim.keymap.set("n", "<localleader>s", submit, { buffer = buf, desc = "submit review comment" })
+  vim.keymap.set("n", "q", discard, { buffer = buf, nowait = true, desc = "discard review comment" })
   vim.api.nvim_create_autocmd("BufWriteCmd", {
     buffer = buf,
     callback = function()

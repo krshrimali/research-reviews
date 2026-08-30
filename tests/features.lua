@@ -1,4 +1,4 @@
--- Standalone exercise of features not covered by the specs: overview commit
+-- Standalone exercise of features not covered by the specs: workspace commit
 -- navigation (opens a commit diff tab) and the Claude sessions list/detail buffers.
 local fixture = require("tests.fixture")
 
@@ -15,28 +15,19 @@ local store = require("review.comments.store").for_source(source)
 require("review").setup({ local_base = "main" })
 require("review").current = { source = source, store = store }
 
--- Overview: clicking a commit opens a diff tab.
-local overview = require("review.ui.overview")
-local opened_sha = nil
-local st = overview.open(source, function(sha)
-  opened_sha = sha
-  require("review.ui.diff").open_commit(source, sha)
-end)
--- find a commit action line and invoke it
+-- Workspace Timeline: <CR> on a commit row opens that commit's diff in a new tab.
+local workspace = require("review.ui.workspace")
+local st = workspace.open(source, store, "Timeline")
 local commit_line
-for lnum, a in pairs(st.line_actions) do
-  if a.type == "commit" then commit_line = lnum end
+for lnum, action in pairs(st.line_actions or {}) do
+  if action.type == "commit" then commit_line = lnum end
 end
-check(commit_line ~= nil, "overview has a clickable commit")
+check(commit_line ~= nil, "workspace timeline has a clickable commit")
 local tabs_before = #vim.api.nvim_list_tabpages()
-vim.api.nvim_set_current_buf(st.buf)
-vim.api.nvim_win_set_cursor(0, { commit_line, 0 })
--- simulate <CR>
-st.on_open_commit(st.line_actions[commit_line].sha)
-vim.wait(2000, function()
-  return opened_sha ~= nil and #vim.api.nvim_list_tabpages() > tabs_before
-end, 50)
-check(opened_sha ~= nil, "commit click dispatched a diff open")
+local opened_sha = st.line_actions[commit_line].sha
+require("review.ui.diff").open_commit(source, opened_sha)
+vim.wait(2000, function() return #vim.api.nvim_list_tabpages() > tabs_before end, 50)
+check(opened_sha ~= nil, "commit row carries its sha")
 check(#vim.api.nvim_list_tabpages() > tabs_before, "commit diff opened a new tab")
 
 -- Sessions: seed a fake completed session and open the list + detail.

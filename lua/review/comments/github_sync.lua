@@ -74,7 +74,10 @@ function M.import(source, store)
           prev.reactions = reaction_counts(nullable(cm.reactionGroups) or {})
           if t.isResolved or prev.status == "resolved" then prev.status = "resolved"
           elseif t.isOutdated then prev.status = "outdated"
-          else prev.status = "draft" end
+          -- Upstream comments are PUBLISHED, never "draft". Calling them drafts made
+          -- the panel's draft counter and filter count other people's landed review
+          -- comments as unsent local work.
+          else prev.status = "published" end
           local rev = side == "LEFT" and source:base_rev() or source:head_rev()
           local lines = anchor.file_lines(meta.repo_root, rev, path) or {}
           prev.anchor = anchor.compute(lines, math.min(line, math.max(1, #lines)))
@@ -93,7 +96,7 @@ function M.import(source, store)
             line_start = line, line_end = line, anchor = a, rename_lineage = {},
             kind = (nullable(cm.body) or ""):find("```suggestion") and "suggestion" or "normal",
             body = nullable(cm.body) or "", origin = "github",
-            status = t.isResolved and "resolved" or (t.isOutdated and "outdated" or "draft"),
+            status = t.isResolved and "resolved" or (t.isOutdated and "outdated" or "published"),
             github_id = gid, github_thread_id = t.id,
             in_reply_to = (i > 1) and root_local_id or nil,
             author = nullable(cm.author) and (nullable(cm.author.login) or "github") or "github",

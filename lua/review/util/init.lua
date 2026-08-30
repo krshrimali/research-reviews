@@ -11,17 +11,53 @@ function M.merge(defaults, opts)
   return vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
 end
 
---- Generate a RFC-4122-ish v4 UUID using Neovim's PRNG.
---- Not cryptographic; used only as a local record id.
+--- Random bytes for id generation. `vim.uv.random` is the only source here that is
+--- actually independent per process; LuaJIT's `math.random` is NOT seeded by Neovim,
+--- so two editors would otherwise mint the *same* comment ids in the same order and
+--- silently clobber each other through the merge-on-write store.
+---@param count integer
+---@return integer[]
+local function random_bytes(count)
+  local ok, bytes = pcall(function()
+    return { string.byte(vim.uv.random(count), 1, count) }
+  end)
+  if ok and bytes and #bytes == count then
+    return bytes
+  end
+  -- Fallback: seed once from a per-process entropy mix, then use math.random.
+  if not M._seeded then
+    local seed = (vim.uv.hrtime() % 2147483647)
+      + (vim.uv.os_getpid() * 2654435761) % 2147483647
+    math.randomseed(seed % 2147483647)
+    M._seeded = true
+  end
+  local out = {}
+  for i = 1, count do
+    out[i] = math.random(0, 255)
+  end
+  return out
+end
+
+M._random_bytes = random_bytes
+
+--- Generate a RFC-4122 v4 UUID. Not cryptographic, but it MUST be unique across
+--- concurrent Neovim instances: comment ids are the merge key of the shared store.
 ---@return string
 function M.uuid()
-  local template = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx"
-  return (
-    template:gsub("[xy]", function(c)
-      local v = (c == "x") and math.random(0, 15) or math.random(8, 11)
-      return string.format("%x", v)
-    end)
-  )
+  local bytes = random_bytes(16)
+  bytes[7] = 0x40 + (bytes[7] % 0x10) -- version 4
+  bytes[9] = 0x80 + (bytes[9] % 0x40) -- variant 10xx
+  local hex = {}
+  for i = 1, 16 do
+    hex[i] = string.format("%02x", bytes[i])
+  end
+  return table.concat({
+    table.concat(hex, "", 1, 4),
+    table.concat(hex, "", 5, 6),
+    table.concat(hex, "", 7, 8),
+    table.concat(hex, "", 9, 10),
+    table.concat(hex, "", 11, 16),
+  }, "-")
 end
 
 --- Short, filesystem-safe hash of a string (for repo/source keys).
@@ -78,6 +114,38 @@ end
 ---@param msg string
 function M.progress(msg)
   show_notice(msg, vim.log.levels.INFO, 10000)
+end
+
+--- An animated, self-dismissing progress notice for a long blocking call.
+--- Returns a handle with `stop()`; safe to stop twice.
+---@param msg string
+---@return table
+function M.spinner(msg)
+  local frames = { "\u{280B}", "\u{2819}", "\u{2839}", "\u{2838}", "\u{283C}",
+    "\u{2834}", "\u{2826}", "\u{2827}", "\u{2807}", "\u{280F}" }
+  local frame = 0
+  local timer = vim.uv.new_timer()
+  local handle = { stopped = false }
+  local function tick()
+    frame = frame % #frames + 1
+    show_notice(frames[frame] .. " " .. msg, vim.log.levels.INFO, 2000)
+  end
+  tick()
+  if timer then
+    timer:start(120, 120, vim.schedule_wrap(function()
+      if handle.stopped then return end
+      tick()
+    end))
+  end
+  function handle.stop()
+    if handle.stopped then return end
+    handle.stopped = true
+    if timer then
+      timer:stop()
+      if not timer:is_closing() then timer:close() end
+    end
+  end
+  return handle
 end
 
 --- Return true and the module if `require(name)` succeeds, else false, err.
