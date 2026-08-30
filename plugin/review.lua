@@ -47,6 +47,10 @@ vim.api.nvim_create_user_command("ReviewComments", function()
   review().toggle_comments_panel()
 end, { desc = "Toggle the comments side-panel" })
 
+vim.api.nvim_create_user_command("ReviewWorkspace", function()
+  review().open_workspace("Conversation")
+end, { desc = "Open Conversation, Timeline, Claude, Comments, and Diff views" })
+
 vim.api.nvim_create_user_command("ReviewRefresh", function() later(function(r) r.refresh() end) end,
   { desc = "Refresh the active PR and its comments" })
 vim.api.nvim_create_user_command("ReviewChat", function() review().toggle_chat() end,

@@ -162,6 +162,30 @@ function GitHubPR:review_decision()
   return self._pr.reviewDecision or ""
 end
 
+---PR-wide discussion items which do not have a diff anchor. These belong in
+---Conversation/Timeline, never on an arbitrary source line.
+function GitHubPR:conversation()
+  local out = {}
+  for _, c in ipairs(self._pr.comments or {}) do
+    out[#out + 1] = {
+      id = c.id, kind = "comment", author = c.author and c.author.login or "github",
+      body = c.body or "", created_at = c.createdAt or "", url = c.url,
+      reactions = c.reactionGroups or {},
+    }
+  end
+  for _, r in ipairs(self._pr.reviews or {}) do
+    if r.body and vim.trim(r.body) ~= "" then
+      out[#out + 1] = {
+        id = r.id, kind = "review", author = r.author and r.author.login or "github",
+        body = r.body, created_at = r.submittedAt or "", state = r.state,
+        reactions = r.reactionGroups or {},
+      }
+    end
+  end
+  table.sort(out, function(a, b) return (a.created_at or "") < (b.created_at or "") end)
+  return out
+end
+
 function GitHubPR:metadata()
   return {
     number = self.number,

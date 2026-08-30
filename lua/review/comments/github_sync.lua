@@ -27,6 +27,15 @@ local function by_github_id(store)
   return idx
 end
 
+local function reaction_counts(groups)
+  local out = {}
+  for _, group in ipairs(groups or {}) do
+    local count = group.users and tonumber(group.users.totalCount) or 0
+    if group.content and count > 0 then out[group.content] = count end
+  end
+  return out
+end
+
 --- Import (or refresh) all GitHub review threads into `store`.
 ---@param source table
 ---@param store table
@@ -62,6 +71,7 @@ function M.import(source, store)
           prev.line_start, prev.line_end = line, line
           prev.author = nullable(cm.author) and nullable(cm.author.login) or prev.author
           prev.github_thread_id, prev.origin = t.id, "github"
+          prev.reactions = reaction_counts(nullable(cm.reactionGroups) or {})
           if t.isResolved or prev.status == "resolved" then prev.status = "resolved"
           elseif t.isOutdated then prev.status = "outdated"
           else prev.status = "draft" end
@@ -87,6 +97,7 @@ function M.import(source, store)
             github_id = gid, github_thread_id = t.id,
             in_reply_to = (i > 1) and root_local_id or nil,
             author = nullable(cm.author) and (nullable(cm.author.login) or "github") or "github",
+            reactions = reaction_counts(nullable(cm.reactionGroups) or {}),
             created_at = nullable(cm.createdAt) or now, updated_at = now, hidden = false,
           }
           store.comments[comment.id] = comment

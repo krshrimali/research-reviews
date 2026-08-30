@@ -182,7 +182,9 @@ M._browser_lines = browser_lines
 local function open_browser(cwd, opts, on_choose)
   opts = opts or {}
   local model = {
-    cwd = cwd, state = opts.state or picker_state(cwd).state or "open",
+    -- A new browser is predictable: it always starts with active PRs. State
+    -- changes made with Tab belong to this browser instance only.
+    cwd = cwd, state = opts.state or "open",
     source = opts.source_name or (opts.prs_only and "prs" or opts.branches_only and "branches" or "both"),
     query = "", items = {}, map = {}, generation = 0, static = opts.items ~= nil,
   }
@@ -280,12 +282,12 @@ local function open_browser(cwd, opts, on_choose)
   end, "open review")
   map("<Tab>", function()
     if model.static then return end
-    model.state = cycle(browser_states, model.state); save_picker_state(cwd, model); load(false)
+    model.state = cycle(browser_states, model.state); load(false)
   end, "next PR state")
   map("<S-Tab>", function()
     if model.static then return end
     for _ = 1, #browser_states - 1 do model.state = cycle(browser_states, model.state) end
-    save_picker_state(cwd, model); load(false)
+    load(false)
   end, "previous PR state")
   map("S", function()
     if not model.static then model.source = cycle(browser_sources, model.source); load(false) end

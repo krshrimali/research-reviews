@@ -68,7 +68,7 @@ local function build(st)
 
   -- Description.
   push("── Description " .. string.rep("─", 40), nil, "NonText")
-  local desc = src:description()
+  local desc = util.normalize_markdown(src:description())
   if desc == "" then
     push("(no description)", nil, "Comment")
   else
@@ -77,6 +77,25 @@ local function build(st)
     end
   end
   push("")
+
+  -- PR-wide conversation: issue comments and review summaries are deliberately
+  -- separate from inline threads because they have no meaningful diff anchor.
+  local conversation = src.conversation and src:conversation() or {}
+  push(("── Conversation (%d) "):format(#conversation) .. string.rep("─", 34), nil, "NonText")
+  if #conversation == 0 then push("(no general PR conversation)", nil, "Comment") end
+  for _, item in ipairs(conversation) do
+    push(("  @%s · %s%s"):format(item.author or "github", util.relative_time(item.created_at),
+      item.state and (" · " .. item.state) or ""), nil, "Title")
+    for _, line in ipairs(vim.split(util.normalize_markdown(item.body), "\n", { plain = true })) do push("    " .. line) end
+    local chips = {}
+    for _, group in ipairs(item.reactions or {}) do
+      local n = group.users and tonumber(group.users.totalCount) or 0
+      if group.content and n > 0 then chips[#chips + 1] = group.content:lower() .. " " .. n end
+    end
+    if #chips > 0 then push("    [" .. table.concat(chips, "] [") .. "]", nil, "Special") end
+    if item.url then push("    " .. item.url, nil, "Underlined") end
+    push("")
+  end
 
   -- Commits.
   local commits = vim.deepcopy(src:commits())
@@ -123,7 +142,7 @@ local function build(st)
         "Title"
       )
       for _, cm in ipairs((t.comments and t.comments.nodes) or {}) do
-        for _, bl in ipairs(vim.split(cm.body or "", "\n", { plain = true })) do
+        for _, bl in ipairs(vim.split(util.normalize_markdown(cm.body), "\n", { plain = true })) do
           push("      │ " .. bl, nil, "Comment")
         end
       end

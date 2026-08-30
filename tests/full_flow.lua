@@ -20,15 +20,15 @@ review.open(".", { base = "main", cwd = dir })
 check(review.current ~= nil, "review context set")
 check(review.current and review.current.source:kind() == "branch", "source is a branch")
 
--- Overview is now opt-in (via the menu). Open it explicitly and confirm.
+-- The prtui-style workspace is opt-in. Open it explicitly and confirm.
 review.show_overview()
 local found_overview = false
 for _, b in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_get_name(b):find("review://overview") then
+  if vim.api.nvim_buf_get_name(b):find("review://workspace") then
     found_overview = true
   end
 end
-check(found_overview, "overview opens on demand (show_overview)")
+check(found_overview, "review workspace opens on demand (show_overview)")
 -- Return to the review tab: Diffview views are tab-local, so asking for the
 -- "current" view from the overview tab correctly returns nil.
 vim.cmd("tabprevious")

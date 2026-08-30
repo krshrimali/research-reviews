@@ -13,6 +13,7 @@ local function diffview_github_threads(store)
       for _, reply in ipairs(store:replies(root.id)) do
         replies[#replies + 1] = {
           author = reply.author, body = reply.body, suggestion = reply.suggestion_text,
+          reactions = reply.reactions,
         }
       end
       mapped[#mapped + 1] = {
@@ -20,7 +21,7 @@ local function diffview_github_threads(store)
         lnum = root.line_start or 1, end_lnum = root.line_end or root.line_start or 1,
         text = root.body or "", origin = "github", author = root.author,
         resolved = root.status == "resolved", outdated = root.status == "outdated",
-        thread_id = root.github_thread_id, replies = replies,
+        reactions = root.reactions, thread_id = root.github_thread_id, replies = replies,
       }
     end
   end
@@ -104,6 +105,10 @@ function M._attach_diff_buffer(bufnr)
     { buffer = bufnr, desc = "review: open file at reviewed commit" })
   pcall(vim.keymap.set, "n", "O", function() M.open_at_commit(true) end,
     { buffer = bufnr, desc = "review: open file at reviewed commit in new tab" })
+  for i, mode in ipairs({ "Conversation", "Timeline", "Claude", "Comments" }) do
+    pcall(vim.keymap.set, "n", "g" .. i, function() M.open_workspace(mode) end,
+      { buffer = bufnr, desc = "review: " .. mode .. " view" })
+  end
   local esc = vim.fn.maparg("<Esc>", "n", false, true)
   if esc and esc.buffer == 1 and tostring(esc.rhs or ""):match("close") then
     pcall(vim.keymap.del, "n", "<Esc>", { buffer = bufnr })
@@ -300,15 +305,14 @@ end
 
 --- Open the overview tab for the current review on demand.
 function M.show_overview()
+  M.open_workspace("Conversation")
+end
+
+function M.open_workspace(mode)
   if not M.current then
     return
   end
-  local overview = require("review.ui.overview")
-  vim.cmd("tabnew")
-  local ov = overview.open(M.current.source, function(sha)
-    require("review.ui.diff").open_commit(M.current.source, sha)
-  end)
-  vim.api.nvim_win_set_buf(0, ov.buf)
+  require("review.ui.workspace").open(M.current.source, M.current.store, mode)
 end
 
 --- Open the contextual action menu — the single key users learn.
@@ -360,7 +364,7 @@ function M.menu()
   items[#items + 1] = { key = "S", label = "Sync latest Claude findings", fn = M.sync_claude_result }
   items[#items + 1] = { key = "Q", label = "Export threads to quickfix", fn = M.threads_to_quickfix }
   items[#items + 1] = { key = "R", label = "Claude review sessions", fn = M.claude_sessions }
-  items[#items + 1] = { key = "O", label = "Overview (description, commits, threads)", fn = M.show_overview }
+  items[#items + 1] = { key = "O", label = "Review workspace (Conversation / Timeline / Claude / Comments / Diff)", fn = M.show_overview }
   items[#items + 1] = { key = "P", label = "Toggle comments panel", fn = M.toggle_comments_panel }
   items[#items + 1] = { key = "L", label = "Choose another review target", fn = M.choose_source }
   items[#items + 1] = { key = "?", label = "Help and key reference", fn = M.help }
@@ -403,9 +407,13 @@ function M.open(arg, opts)
   if config.get().workspace.dedicated_tab then vim.cmd("tabnew") end
   M.current = { source = source, store = store }
 
-  -- Import GitHub threads for PRs (best-effort).
+  -- Every PR open performs a fresh, read-only GitHub thread fetch. Existing
+  -- store entries are retained if GitHub is temporarily unavailable.
+  local imported, refreshed = 0, 0
   if source:caps().has_threads then
-    local _, import_err = require("review.comments.github_sync").import(source, store)
+    source._threads = nil
+    local import_err
+    imported, import_err, refreshed = require("review.comments.github_sync").import(source, store)
     if import_err then util.notify("GitHub comments were not imported: " .. tostring(import_err), vim.log.levels.WARN) end
   end
 
@@ -420,8 +428,9 @@ function M.open(arg, opts)
     end)
   end
 
-  util.notify(string.format("Review opened · %s · %d comments · %.1fs · <leader>p for actions",
-    source:title(), vim.tbl_count(store.comments), (vim.uv.hrtime() - started) / 1e9))
+  util.notify(string.format("Review opened · %s · %d comments (%d new, %d updated from GitHub) · %.1fs · <leader>p for actions",
+    source:title(), vim.tbl_count(store.comments), imported or 0, refreshed or 0,
+    (vim.uv.hrtime() - started) / 1e9))
 end
 
 --- Open the fuzzy source picker.

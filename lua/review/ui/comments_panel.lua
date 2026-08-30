@@ -40,7 +40,7 @@ local function matches(root, filter, query)
 end
 
 local function add_body(lines, map, root, prefix, body)
-  local body_lines = vim.split(body or "", "\n", { plain = true })
+  local body_lines = vim.split(util.normalize_markdown(body), "\n", { plain = true })
   for i = 2, math.min(#body_lines, 6) do
     table.insert(lines, prefix .. body_lines[i]); map[#lines] = root
   end
@@ -84,16 +84,23 @@ local function render_tree(node, depth, lines, map, store, selected)
       local checked = selected[root.id] and "[x]" or "[ ]"
       local reaction_count = 0
       for _, n in pairs(root.reactions or {}) do reaction_count = reaction_count + n end
-      local body = vim.split(root.body or "", "\n", { plain = true })
+      local body = vim.split(util.normalize_markdown(root.body), "\n", { plain = true })
       local suffix = count > 1 and string.format(" · %d messages", count) or ""
       if reaction_count > 0 then suffix = suffix .. " · ♥" .. reaction_count end
+      if root.status == "outdated" then suffix = suffix .. " · OUTDATED" end
       local prefix = indent .. "  "
       table.insert(lines, string.format("%s%s %s @%s: %s%s", prefix, checked, icon,
         root.author or "unknown", body[1] or "", suffix))
       map[#lines] = root
       add_body(lines, map, root, prefix .. "    ", root.body)
+      if reaction_count > 0 then
+        local chips = {}
+        for name, n in pairs(root.reactions or {}) do chips[#chips + 1] = string.format("%s %d", name:lower(), n) end
+        table.sort(chips)
+        table.insert(lines, prefix .. "    [" .. table.concat(chips, "] [") .. "]"); map[#lines] = root
+      end
       for _, reply in ipairs(store:replies(root.id)) do
-        local reply_body = vim.split(reply.body or "", "\n", { plain = true })
+        local reply_body = vim.split(util.normalize_markdown(reply.body), "\n", { plain = true })
         table.insert(lines, string.format("%s    ↳ @%s: %s", prefix, reply.author or "unknown", reply_body[1] or ""))
         map[#lines] = root
         add_body(lines, map, root, prefix .. "      ", reply.body)

@@ -10,6 +10,12 @@ local function new_source()
 end
 
 describe("overview render", function()
+  it("normalizes CRLF and GitHub HTML", function()
+    local util = require("review.util")
+    assert.equals("See [docs](https://example.test)\nnext & `x`",
+      util.normalize_markdown('See <a href="https://example.test">docs</a>\r\nnext &amp; <code>x</code>'))
+  end)
+
   it("renders title, commits, and description", function()
     local _, source = new_source()
     local overview = require("review.ui.overview")
@@ -65,6 +71,21 @@ describe("markers", function()
 end)
 
 describe("comments panel", function()
+  it("renders the five-view workspace and explicit outdated section", function()
+    local _, source, store = new_source()
+    local root = store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 2,
+      body = "old note", author = "alice" })
+    store:update(root.id, { status = "outdated", reactions = { EYES = 2 } })
+    require("review.ui.workspace").open(source, store, "Comments")
+    local text = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+    assert.is_truthy(text:find("1 Conversation", 1, true))
+    assert.is_truthy(text:find("[4 Comments]", 1, true))
+    assert.is_truthy(text:find("Outdated (1)", 1, true))
+    assert.is_truthy(text:find("OUTDATED — no current diff anchor", 1, true))
+    assert.is_truthy(text:find("[eyes 2]", 1, true))
+    vim.cmd("tabclose")
+  end)
+
   it("lists threads for a file and closes", function()
     local _, source, store = new_source()
     store:add({ file = "src/auth.lua", side = "RIGHT", line_start = 2, body = "panel note" })

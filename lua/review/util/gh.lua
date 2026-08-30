@@ -106,7 +106,7 @@ function M.pr_view(number, cwd)
   local fields = "number,title,body,author,state,isDraft,updatedAt,createdAt,"
     .. "headRefName,baseRefName,headRefOid,baseRefOid,labels,assignees,"
     .. "headRepository,headRepositoryOwner,isCrossRepository,reviewRequests,reviews,"
-    .. "reviewDecision,statusCheckRollup,commits,files,mergeable"
+    .. "reviewDecision,statusCheckRollup,commits,files,mergeable,comments"
   local ok, out, err = proc.run(
     { vim.env.PRTUI_GH_BIN or "gh", "pr", "view", tostring(number), "--json", fields },
     { cwd = cwd }
@@ -135,6 +135,7 @@ query($owner:String!, $repo:String!, $number:Int!, $cursor:String) {
             nodes {
               id databaseId author { login } body createdAt
               path originalLine line diffHunk
+              reactionGroups { content users { totalCount } }
             }
           }
         }

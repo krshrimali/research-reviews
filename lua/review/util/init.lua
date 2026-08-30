@@ -113,6 +113,26 @@ function M.truncate(s, n)
   return s:sub(1, offsets[n] - 1) .. "…"
 end
 
+---Normalize GitHub's supported inline HTML into readable Markdown. This also
+---removes CR characters returned by APIs that preserve Windows line endings.
+---@param text string|nil
+---@return string
+function M.normalize_markdown(text)
+  text = tostring(text or ""):gsub("\r\n", "\n"):gsub("\r", "\n")
+  text = text:gsub("<[bB][rR]%s*/?>", "\n")
+  text = text:gsub("<[sS][uU][mM][mM][aA][rR][yY][^>]*>(.-)</[sS][uU][mM][mM][aA][rR][yY]>", "**%1**")
+  text = text:gsub("<[aA]%s+[^>]-[hH][rR][eE][fF]%s*=%s*\"([^\"]+)\"[^>]*>(.-)</[aA]>", "[%2](%1)")
+  text = text:gsub("<[aA]%s+[^>]-[hH][rR][eE][fF]%s*=%s*'([^']+)'[^>]*>(.-)</[aA]>", "[%2](%1)")
+  text = text:gsub("<[cC][oO][dD][eE][^>]*>(.-)</[cC][oO][dD][eE]>", "`%1`")
+  text = text:gsub("<[lL][iI][^>]*>", "\n- "):gsub("</[lL][iI]>", "")
+  text = text:gsub("</?[uU][lL][^>]*>", "\n"):gsub("</?[oO][lL][^>]*>", "\n")
+  text = text:gsub("</?[dD][eE][tT][aA][iI][lL][sS][^>]*>", "\n")
+  text = text:gsub("</?[pP][^>]*>", "\n"):gsub("<[^>]+>", "")
+  local entities = { amp = "&", lt = "<", gt = ">", quot = '"', apos = "'", ['#39'] = "'" }
+  text = text:gsub("&([%w#]+);", function(name) return entities[name] or ("&" .. name .. ";") end)
+  return M.trim(text:gsub("\n\n\n+", "\n\n"))
+end
+
 --- ISO-8601 -> "2h ago" style relative time. Falls back to the raw string.
 ---@param iso string|nil
 ---@return string
