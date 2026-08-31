@@ -198,7 +198,9 @@ function M.wrap_window(win)
   vim.wo[win].wrap = true
   vim.wo[win].linebreak = true -- break on words, not mid-token
   vim.wo[win].breakindent = true -- keep a wrapped line under its own indent
-  vim.wo[win].showbreak = "↪ "
+  -- Deliberately no 'showbreak': breakindent already marks a continuation, and a
+  -- marker costs two columns of a 42-column panel while making wrapped prose read
+  -- like a new entry.
 end
 
 --- Return true and the module if `require(name)` succeeds, else false, err.

@@ -153,17 +153,43 @@ local function cycle(values, current)
   return values[1]
 end
 
+--- True when pull-request state (open/closed/merged) applies to what is listed.
+--- Local branches have no such state, so the tabs must not be shown as live there.
+---@param model table
+---@return boolean
+local function shows_prs(model)
+  return not model.static and model.source ~= "branches"
+end
+
+M._shows_prs = shows_prs
+
 local function browser_lines(model)
-  local active = {}
-  for _, value in ipairs(browser_states) do
-    active[#active + 1] = value == model.state and ("[" .. value:upper() .. "]") or value
+  local state_row
+  if model.static then
+    state_row = "[" .. model.source:upper() .. "]"
+  elseif shows_prs(model) then
+    local active = {}
+    for _, value in ipairs(browser_states) do
+      active[#active + 1] = value == model.state and ("[" .. value:upper() .. "]") or value
+    end
+    state_row = table.concat(active, "  ")
+  else
+    -- Branch listings have no PR state; showing the tabs implied Tab would filter.
+    state_row = "local branches · no pull-request state"
+  end
+  local keys
+  if model.static then
+    keys = "/ search · Q quickfix · <CR> open · q close"
+  elseif shows_prs(model) then
+    keys = "Tab state · S sources · / search · r refresh · Q quickfix · <CR> open · q close"
+  else
+    keys = "S sources · / search · r refresh · Q quickfix · <CR> open · q close"
   end
   local lines = {
     "Review browser",
-    model.static and ("[" .. model.source:upper() .. "]") or table.concat(active, "  "),
+    state_row,
     string.format("Sources: %s%s", model.source, model.query ~= "" and ("  ·  Search: " .. model.query) or ""),
-    model.static and "/ search · Q quickfix · <CR> open · q close"
-      or "Tab state · S sources · / search · r refresh · Q quickfix · <CR> open · q close",
+    keys,
     string.rep("─", 72),
   }
   local map = {}
@@ -302,15 +328,17 @@ local function open_browser(cwd, opts, on_choose)
     local item = model.map[vim.api.nvim_win_get_cursor(0)[1]]
     if item then on_choose(item) end
   end, "open review")
-  map("<Tab>", function()
-    if model.static then return end
-    model.state = cycle(browser_states, model.state); load(false)
-  end, "next PR state")
-  map("<S-Tab>", function()
-    if model.static then return end
-    for _ = 1, #browser_states - 1 do model.state = cycle(browser_states, model.state) end
+  local function cycle_state(backwards)
+    if not shows_prs(model) then
+      util.notify("pull-request state does not apply to local branches", vim.log.levels.INFO)
+      return
+    end
+    local steps = backwards and (#browser_states - 1) or 1
+    for _ = 1, steps do model.state = cycle(browser_states, model.state) end
     load(false)
-  end, "previous PR state")
+  end
+  map("<Tab>", function() cycle_state(false) end, "next PR state")
+  map("<S-Tab>", function() cycle_state(true) end, "previous PR state")
   map("S", function()
     -- :ReviewPRs / :ReviewBranches open a deliberately scoped browser; letting S
     -- wander out of that scope also left the PR state tabs displayed above a list
