@@ -91,3 +91,23 @@ command clashes.
 
 Your diffview fork already has PR-review commands (`DiffviewPR`, `DiffviewReview`, …)
 under `<leader>gd`/`<leader>gP`. review.nvim is a separate, complementary plugin.
+
+## Keep the lazy.nvim command list in step
+
+review.nvim is lazy-loaded by command, so any command missing from the `cmd` list in
+your plugin spec will report `E492: Not an editor command` until something else loads
+the plugin first. The current set is:
+
+```lua
+cmd = {
+  "Review", "ReviewList", "ReviewPRs", "ReviewBranches", "ReviewCommits",
+  "ReviewCurrent", "ReviewBase", "ReviewClaude", "ReviewSessions",
+  "ReviewComments", "ReviewWorkspace", "ReviewRefresh", "ReviewChat",
+  "ReviewPrompt", "ReviewImport", "ReviewSync", "ReviewQuickfix",
+  "ReviewPublish", "ReviewDedupe", "ReviewClean", "ReviewHealth",
+  "ReviewProfile", "ReviewHelp",
+},
+```
+
+`ReviewBase`, `ReviewPublish` and `ReviewDedupe` are the newest; add them when you
+update, or drop `cmd` entirely and load the plugin eagerly.

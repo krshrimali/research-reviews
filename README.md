@@ -30,8 +30,10 @@ resolution, manual refresh, an editable/copyable agent prompt, and conversationa
 sessions through Sidekick. Edit-enabled sessions require explicit consent and use only a
 private worktree under the reviewed repository's own `.git/prtui/worktrees` directory.
 
-The default workspace keeps Diffview's file tree and diff visible alongside a responsive
-thread inbox. The inbox supports `/` search, `f` status filters, `Space` multi-select,
+The file tree marks viewed files and shows each file's open thread count. The default
+workspace keeps Diffview's file tree and diff visible alongside a responsive thread inbox,
+which also lists PR-level comments and review summaries — everything not anchored to a
+line — under `conversation`. The inbox supports `/` search, `f` status filters, `Space` multi-select,
 `a` scoped Claude review, `I` GitHub import, `Q` quickfix export, and `p` draft publishing.
 In the persistent review browser, press `Q` to send visible rows to quickfix;
 `<Enter>` on a quickfix row opens that PR or branch review.
@@ -47,10 +49,42 @@ moved/outdated thread metadata and nested replies.
 Use `:ReviewSync` to recover the latest Claude findings from its exact transcript.
 Diffview-native `REVIEW #n` comments are included in Claude requests; replies and new
 findings return to the inline diff and the left Comments section.
-In a diff, `[t`/`]t` navigate all threads, `[u`/`]u` navigate unresolved threads,
-`<localleader>v` marks the file viewed without shadowing native visual mode, and `o`/`O`
-open the reviewed file in the current/new tab. Claude progress appears in the winbar and
-structured replies/findings are imported back into inline UI threads when the run completes.
+In a diff, `[t`/`]t` navigate all threads and `[u`/`]u` navigate unresolved ones; both
+land in the pane that actually holds the thread, so `<CR>` expands it straight away.
+`R` replies, `gr` resolves and `gd` deletes the thread under the cursor.
+`<localleader>v` marks the file viewed, and `go`/`gO` open the reviewed file in the
+current/new tab — `o` and `O` keep their normal Vim meaning. Claude progress appears in
+the winbar and structured replies/findings are imported back when the run completes.
+
+## Reviewing and publishing
+
+`<leader>p` → `p` (or `:ReviewPublish`) opens the submission preview. `e` cycles the
+verdict COMMENT → APPROVE → REQUEST_CHANGES, `b` writes the review summary — kept with
+the review until it is submitted — and `Ctrl-S` publishes. Multi-line comments publish as
+ranges. A review larger than `publish_batch_limit` (20) is built one thread at a time
+through GitHub's pending-review API, because a single request carrying dozens of comments
+is rejected; if a submission errors, the plugin asks GitHub what actually landed before
+reporting failure, so a retry cannot post everything twice. `:ReviewDedupe` merges threads
+that ended up pointing at the same upstream comment.
+
+`:ReviewBase [<target>]` opens a review against a base you choose at open time.
+
+Diffview and review.nvim both know how to draw a thread inside the diff. `inline_owner`
+decides which one does: `"auto"` (default) lets Diffview render the threads review.nvim
+bridges to it and keeps local drafts for itself; `"review"` and `"diffview"` force it.
+
+## Agent reviews
+
+`:ReviewClaude` picks instructions and permissions. "Read-only review" is enforced on the
+agent process itself with an explicit tool allowlist — neither mode can push or rewrite
+history. Edit-enabled runs happen in a private worktree under the reviewed repository's
+own `.git/prtui/worktrees`, and `:ReviewClean` refuses to remove one holding commits no
+branch can reach.
+
+The agent's results are read from its saved transcript; review.nvim keeps that transcript
+enabled even when Neovim was started from inside another agent session, because the
+agent's terminal keeps no scrollback and is not a usable fallback. If a run is still
+waiting on a confirmation prompt, the review prompt is held until the agent can accept it.
 
 ## Config
 
