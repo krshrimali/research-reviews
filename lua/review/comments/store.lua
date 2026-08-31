@@ -75,12 +75,35 @@ function Store:set_review_draft(fields)
   return draft
 end
 
+--- True when `file` was marked viewed at the revision under review. A file marked
+--- at an older head counts as unviewed again, which is the point.
+---@param file string
+---@return boolean
 function Store:is_viewed(file)
-  return self.viewed[file] == self.source:head_rev()
+  local mark = self.viewed[file]
+  if not mark then -- nil (never marked) or false (explicitly cleared)
+    return false
+  end
+  return mark == self.source:head_rev()
 end
 
+--- Mark a file viewed at the current head, or clear the mark.
+---
+--- NOT `value == false and nil or head_rev`: in Lua the `and` branch yielding nil
+--- falls straight through the `or`, so that expression always produced head_rev and
+--- a file could be marked viewed but never un-marked.
+---@param file string
+---@param value boolean|nil  false clears; anything else marks viewed
+---@return boolean viewed
 function Store:set_viewed(file, value)
-  self.viewed[file] = value == false and nil or self.source:head_rev()
+  if value == false then
+    -- Recorded as an explicit `false`, not by deleting the key: state.save merges
+    -- meta with what is on disk via tbl_deep_extend, which cannot express a
+    -- deletion, so a removed key was simply resurrected on the next load.
+    self.viewed[file] = false
+  else
+    self.viewed[file] = self.source:head_rev()
+  end
   self:save()
   return self:is_viewed(file)
 end

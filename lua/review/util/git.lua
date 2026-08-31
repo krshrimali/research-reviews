@@ -244,7 +244,10 @@ function M.fetch_pr(repo_url, number, base_ref, cwd)
     timeout = 60000,
     env = { GIT_TERMINAL_PROMPT = "0", GIT_SSH_COMMAND = "ssh -o BatchMode=yes" },
   })
-  return ok, ok and nil or (err ~= "" and err or out)
+  if ok then
+    return true, nil
+  end
+  return false, err ~= "" and err or out
 end
 
 ---@param repo_url string
@@ -260,7 +263,10 @@ function M.push_head(repo_url, branch, cwd)
     timeout = 60000,
     env = { GIT_TERMINAL_PROMPT = "0", GIT_SSH_COMMAND = "ssh -o BatchMode=yes" },
   })
-  return ok, ok and nil or (err ~= "" and err or out)
+  if ok then
+    return true, nil
+  end
+  return false, err ~= "" and err or out
 end
 
 return M

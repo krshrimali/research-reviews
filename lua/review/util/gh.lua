@@ -225,7 +225,10 @@ function M.submit_review(owner, repo, number, payload, cwd)
     "--method", "POST", "--input", "-" }, { cwd = cwd, stdin = vim.json.encode(payload) })
   if not ok then return nil, M.error_message(out, err) end
   local decoded, value = pcall(vim.json.decode, out)
-  return decoded and value or nil, decoded and nil or "bad GitHub response"
+  if not decoded then
+    return nil, "bad GitHub response"
+  end
+  return value, nil
 end
 
 --- The login of the authenticated user, cached for the session.
@@ -282,7 +285,10 @@ function M.start_pending_review(pr_id, cwd)
   local data, err = M.graphql(q, { pr = pr_id }, cwd)
   if not data then return nil, err end
   local ok, id = pcall(function() return data.addPullRequestReview.pullRequestReview.id end)
-  return ok and id or nil, ok and nil or "unexpected pending-review response"
+  if not ok or not id then
+    return nil, "unexpected pending-review response"
+  end
+  return id, nil
 end
 
 --- Add one inline thread to a pending review.

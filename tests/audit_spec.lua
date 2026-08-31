@@ -393,3 +393,55 @@ describe("worktree pruning", function()
     assert.equals(0, kept)
   end)
 end)
+
+describe("viewed state", function()
+  local function fresh()
+    local dir = fixture.create()
+    local source = assert(require("review.source").create(".", dir, { base = "main" }))
+    return require("review.comments.store").for_source(source)
+  end
+
+  it("toggles, rather than only ever marking viewed", function()
+    -- `value == false and nil or head_rev` always produced head_rev, because in Lua
+    -- an `and` branch that yields nil falls straight through the `or`. A file could
+    -- be marked viewed and never un-marked.
+    local store = fresh()
+    local file = "src/auth.lua"
+    assert.is_false(store:is_viewed(file))
+    for expected in ipairs({ true, false, true, false }) do end
+    local sequence = { true, false, true, false }
+    for _, want in ipairs(sequence) do
+      assert.equals(want, store:set_viewed(file, not store:is_viewed(file)))
+    end
+  end)
+
+  it("clears on an explicit false and marks on true", function()
+    local store = fresh()
+    local file = "src/auth.lua"
+    assert.is_true(store:set_viewed(file, true))
+    assert.is_false(store:set_viewed(file, false))
+    assert.is_true(store:set_viewed(file, true))
+  end)
+
+  it("keeps viewed_progress in step with the toggle", function()
+    local store = fresh()
+    local _, total = store:viewed_progress()
+    assert.is_true(total >= 1)
+    store:set_viewed("src/auth.lua", true)
+    local viewed = store:viewed_progress()
+    assert.equals(1, viewed)
+    store:set_viewed("src/auth.lua", false)
+    viewed = store:viewed_progress()
+    assert.equals(0, viewed)
+  end)
+
+  it("survives a reload as unviewed once cleared", function()
+    local dir = fixture.create()
+    local source = assert(require("review.source").create(".", dir, { base = "main" }))
+    local store = require("review.comments.store").for_source(source)
+    store:set_viewed("src/auth.lua", true)
+    store:set_viewed("src/auth.lua", false)
+    local reloaded = require("review.comments.store").for_source(source)
+    assert.is_false(reloaded:is_viewed("src/auth.lua"))
+  end)
+end)
