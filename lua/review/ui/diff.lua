@@ -58,6 +58,21 @@ function M.buffer_context(bufnr)
   return nil
 end
 
+--- The file the diff is currently showing, regardless of which window is focused.
+---
+--- `context()` answers only for the *current* buffer, so anything running from the
+--- comments panel — which is not a diff buffer — could not tell which file was on
+--- screen.
+---@return string|nil
+function M.current_file()
+  local view = current_view()
+  local entry = view and view.cur_entry
+  if not entry then
+    return nil
+  end
+  return entry.path or entry.oldpath
+end
+
 --- Context for the buffer in the current window (nil if it's not a diff buffer).
 ---@return table|nil
 function M.context(line)

@@ -380,11 +380,10 @@ function M.open(store, file, side, on_jump)
   end, "cycle filter")
   map("s", function()
     if st.scope == "review" then
-      local target = st.scoped_file
-      if not target then
-        local ctx = require("review.ui.diff").context()
-        target = ctx and ctx.file or nil
-      end
+      -- Not context(): this key only exists inside the panel, which is never a diff
+      -- buffer, so asking about the *current* buffer always answered nil and the
+      -- scope toggle could not fire at all.
+      local target = require("review.ui.diff").current_file() or st.scoped_file
       if not target then
         util.notify("no file in the diff to scope to", vim.log.levels.INFO)
         return
