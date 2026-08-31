@@ -79,7 +79,7 @@ function M.open(payload, drafts, on_submit, opts)
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
   vim.api.nvim_win_set_height(win, math.max(12, math.floor(vim.o.lines * 0.4)))
-  vim.wo[win].wrap, vim.wo[win].linebreak = true, true
+  util.wrap_window(win)
 
   local function render()
     vim.bo[buf].modifiable = true

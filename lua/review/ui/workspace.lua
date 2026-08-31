@@ -238,7 +238,7 @@ function M.open(source, store, mode)
   vim.cmd("tabnew"); vim.api.nvim_win_set_buf(0, buf)
   util.name_buffer(buf, "review://workspace/" .. util.hash(source:key()))
   vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].filetype = "nofile", "wipe", "markdown"
-  vim.wo.wrap, vim.wo.linebreak, vim.wo.breakindent = true, true, true
+  util.wrap_window()
   local st = { source = source, store = store, mode = mode or "Conversation", buf = buf }
   local function switch(index)
     if index == 5 then vim.cmd("tabclose"); return end

@@ -309,7 +309,7 @@ function M.open(store, file, side, on_jump)
   vim.api.nvim_win_set_width(win, require("review.config").get().workspace.comments_width)
   vim.wo[win].number = false
   vim.wo[win].relativenumber = false
-  vim.wo[win].wrap = true
+  util.wrap_window(win)
   vim.wo[win].cursorline = true
 
   local st = {

@@ -67,6 +67,7 @@ function M.open()
   vim.bo[buf].modifiable = false
   vim.cmd("tabnew")
   vim.api.nvim_win_set_buf(0, buf)
+  require("review.util").wrap_window()
   vim.keymap.set("n", "q", "<cmd>tabclose<cr>", { buffer = buf, nowait = true })
 end
 

@@ -39,18 +39,26 @@ function M.open(items, opts)
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
   vim.bo[buf].modifiable = false
 
+  -- The float wraps, so a line longer than the (possibly capped) width occupies
+  -- more than one screen row; sizing the height to #lines alone would clip it.
+  local win_width = math.min(width, math.max(20, vim.o.columns - 4))
+  local height = 0
+  for _, line in ipairs(lines) do
+    height = height + math.max(1, math.ceil(vim.fn.strdisplaywidth(line) / win_width))
+  end
   local win = vim.api.nvim_open_win(buf, true, {
     relative = "cursor",
     row = 1,
     col = 0,
-    width = math.min(width, vim.o.columns - 4),
-    height = #lines,
+    width = win_width,
+    height = math.min(height, math.max(3, vim.o.lines - 6)),
     style = "minimal",
     border = "rounded",
     title = " " .. title .. " ",
     title_pos = "left",
   })
   vim.wo[win].cursorline = true
+  require("review.util").wrap_window(win)
 
   -- Highlight the accelerator key on each action line.
   local ns = vim.api.nvim_create_namespace("review_menu")

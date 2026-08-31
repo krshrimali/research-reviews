@@ -176,14 +176,10 @@ local function browser_lines(model)
   local query = model.query:lower()
   for _, item in ipairs(model.items) do
     if query == "" or (item.search or item.label):lower():find(query, 1, true) then
-      local width = math.max(20, (model.width or vim.o.columns) - 2)
-      local label = item.label
-      if item.raw and width < 96 then
-        local prefix = "#" .. tostring(item.raw.number) .. " "
-        local suffix = "  " .. tostring(item.raw.state or "")
-        label = prefix .. util.truncate(item.raw.title or "", math.max(8, width - #prefix - #suffix)) .. suffix
-      end
-      lines[#lines + 1] = util.truncate(label, width)
+      -- Full label, no truncation: the window wraps, so a long PR title spills onto
+      -- a second screen row instead of being cut off. One buffer line per item still,
+      -- so `map` and cursor movement are unaffected.
+      lines[#lines + 1] = item.label
       map[#lines] = item
     end
   end
@@ -208,7 +204,7 @@ local function open_browser(cwd, opts, on_choose)
   vim.api.nvim_win_set_buf(0, buf)
   vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].swapfile = "nofile", "wipe", false
   vim.bo[buf].filetype = "review-sources"
-  vim.wo.wrap, vim.wo.linebreak = false, false
+  util.wrap_window()
   vim.wo.cursorline = true
   util.name_buffer(buf, "review://sources/" .. util.hash(cwd) .. "/" .. model.source)
 

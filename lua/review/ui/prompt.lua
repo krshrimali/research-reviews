@@ -18,6 +18,7 @@ function M.open(text, opts)
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
   vim.api.nvim_win_set_height(win, math.max(12, math.floor(vim.o.lines * 0.35)))
+  util.wrap_window(win)
   vim.wo[win].winbar = " Final review prompt · edit freely · :write run · y copy · q close "
   state = { buf = buf, win = win }
   local function current()

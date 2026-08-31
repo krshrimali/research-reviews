@@ -183,6 +183,24 @@ function M.name_buffer(buf, name)
   return (pcall(vim.api.nvim_buf_set_name, buf, name))
 end
 
+--- Make a window show all of its content instead of cutting it off.
+---
+--- Every surface here is prose or wrapped-width UI, never a column-aligned table, so
+--- soft wrapping is always the right answer. Set explicitly rather than inherited:
+--- a window inherits the *global* 'wrap', so one `set nowrap` anywhere silently
+--- truncated the review's own panels.
+---@param win integer|nil  defaults to the current window
+function M.wrap_window(win)
+  win = win or vim.api.nvim_get_current_win()
+  if not vim.api.nvim_win_is_valid(win) then
+    return
+  end
+  vim.wo[win].wrap = true
+  vim.wo[win].linebreak = true -- break on words, not mid-token
+  vim.wo[win].breakindent = true -- keep a wrapped line under its own indent
+  vim.wo[win].showbreak = "↪ "
+end
+
 --- Return true and the module if `require(name)` succeeds, else false, err.
 ---@param name string
 ---@return boolean ok, any mod_or_err

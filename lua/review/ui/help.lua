@@ -92,8 +92,7 @@ function M.open()
   vim.bo[buf].filetype = "markdown"
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, M.lines())
   vim.bo[buf].modifiable = false
-  vim.wo.wrap = true
-  vim.wo.linebreak = true
+  require("review.util").wrap_window()
   vim.keymap.set("n", "q", "<cmd>tabclose<CR>", { buffer = buf, nowait = true, desc = "close review help" })
   pcall(vim.treesitter.start, buf, "markdown")
 end

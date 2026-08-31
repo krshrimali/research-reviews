@@ -61,6 +61,7 @@ function M.list(store)
 
   vim.cmd("tabnew")
   vim.api.nvim_win_set_buf(0, buf)
+  util.wrap_window()
 
   local function map_key(lhs, fn)
     vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true })
@@ -170,6 +171,7 @@ function M.detail(s, store)
 
   vim.cmd("tabnew")
   vim.api.nvim_win_set_buf(0, buf)
+  util.wrap_window()
   -- If the session made edits, root the tab in its worktree (R4).
   if s.cwd and vim.fn.isdirectory(s.cwd) == 1 then
     pcall(vim.cmd, "tcd " .. vim.fn.fnameescape(s.cwd))

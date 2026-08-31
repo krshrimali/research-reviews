@@ -51,6 +51,7 @@ function M.open(opts)
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)
   vim.api.nvim_win_set_height(win, math.max(8, math.floor(vim.o.lines * 0.25)))
+  util.wrap_window(win)
   -- Land where the writing continues: inside the fence for a suggestion, at the END
   -- of an existing body when editing (typing at line 1 col 1 used to prepend).
   local line_count = vim.api.nvim_buf_line_count(buf)
