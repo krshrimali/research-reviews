@@ -522,3 +522,50 @@ describe("comments panel and window width", function()
     review.current = nil
   end)
 end)
+
+describe("several reviews at once", function()
+  it("points actions at the review that owns the tab", function()
+    -- M.current is a single global while a review lives in its own tab, so opening a
+    -- second review left the first tab's menu, comments and publish acting on the
+    -- second review's store.
+    local review = require("review")
+    review._reviews = {}
+    local a = { source = { title = function() return "review A" end }, store = { name = "A" } }
+    local b = { source = { title = function() return "review B" end }, store = { name = "B" } }
+
+    local first = vim.api.nvim_get_current_tabpage()
+    review.current = a
+    review.bind_tab(first, a)
+
+    vim.cmd("tabnew")
+    local second = vim.api.nvim_get_current_tabpage()
+    review.current = b
+    review.bind_tab(second, b)
+
+    review.focus_tab(first)
+    assert.equals("A", review.current.store.name)
+    review.focus_tab(second)
+    assert.equals("B", review.current.store.name)
+
+    -- A tab holding no review must not change the context.
+    vim.cmd("tabnew")
+    review.focus_tab()
+    assert.equals("B", review.current.store.name)
+
+    vim.cmd("tabclose")
+    vim.cmd("tabclose")
+    review.current, review._reviews = nil, {}
+  end)
+
+  it("forgets a review whose tab has closed", function()
+    local review = require("review")
+    review._reviews = {}
+    vim.cmd("tabnew")
+    local tab = vim.api.nvim_get_current_tabpage()
+    review.bind_tab(tab, { store = { name = "gone" } })
+    vim.cmd("tabclose")
+    review.focus_tab()
+    assert.is_nil(review._reviews[tab])
+    review.current, review._reviews = nil, {}
+  end)
+end)

@@ -58,6 +58,38 @@ end
 ---@field store table
 M.current = nil
 
+--- Which review lives in which tabpage.
+---
+--- `M.current` is a single global, but a review lives in its own tab and a session
+--- routinely has several open. Without this, switching back to an earlier review's
+--- tab left every action — comment, resolve, publish — pointed at whichever review
+--- was opened last.
+---@type table<integer, ReviewContext>
+M._reviews = {}
+
+--- Remember that `context` is the review shown in `tab`.
+---@param tab integer
+---@param context ReviewContext
+function M.bind_tab(tab, context)
+  M._reviews[tab] = context
+end
+
+--- Point M.current at whatever review owns this tabpage, if any. Tabs that hold no
+--- review (a worktree file, an unrelated buffer) leave the context alone.
+---@param tab integer|nil
+function M.focus_tab(tab)
+  tab = tab or vim.api.nvim_get_current_tabpage()
+  for known in pairs(M._reviews) do
+    if not vim.api.nvim_tabpage_is_valid(known) then
+      M._reviews[known] = nil
+    end
+  end
+  local context = M._reviews[tab]
+  if context then
+    M.current = context
+  end
+end
+
 --- Compute a rename map old_path -> new_path from the source's file list.
 ---@param source table
 ---@return table<string,string>
@@ -443,7 +475,9 @@ function M.open_workspace(mode)
   if not M.current then
     return
   end
-  require("review.ui.workspace").open(M.current.source, M.current.store, mode)
+  local context = M.current
+  require("review.ui.workspace").open(context.source, context.store, mode)
+  M.bind_tab(vim.api.nvim_get_current_tabpage(), context)
 end
 
 --- Open the contextual action menu — the single key users learn.
@@ -594,6 +628,7 @@ local function realize_review(source, started)
 
   if config.get().workspace.dedicated_tab then vim.cmd("tabnew") end
   M.current = { source = source, store = store }
+  M.bind_tab(vim.api.nvim_get_current_tabpage(), M.current)
 
   -- Every PR open performs a fresh, read-only GitHub thread fetch. Existing
   -- store entries are retained if GitHub is temporarily unavailable.
@@ -1347,6 +1382,13 @@ function M.setup(opts)
   -- The panel is hidden when the window gets too narrow to hold it — and brought
   -- back when there is room again. Closing without reopening meant one shrink lost
   -- the panel for the rest of the review, with nothing to say why.
+  vim.api.nvim_create_autocmd("TabEnter", {
+    group = group,
+    callback = function()
+      M.focus_tab()
+    end,
+  })
+
   vim.api.nvim_create_autocmd("VimResized", {
     group = group,
     callback = function()
