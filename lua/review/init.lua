@@ -94,9 +94,19 @@ function M._attach_diff_buffer(bufnr)
     { buffer = bufnr, nowait = true, desc = "review: actions menu" })
   pcall(vim.keymap.set, "n", km.primary, function()
     local ctx = diff.context()
-    if ctx then
-      markers.toggle_at_cursor(ctx.bufnr, store, ctx.file, ctx.side, ctx.line)
+    if not ctx then return end
+    local root = markers.thread_at_cursor(store, ctx.file, ctx.side, ctx.line)
+    -- When Diffview owns this thread's inline block (see markers.delegated), toggling
+    -- our own expansion renders nothing — the key would silently do nothing. Hand off
+    -- to Diffview's fold instead, so the primary key always means the same thing.
+    if root and markers.delegated(root) then
+      local ok, dv_review = pcall(require, "diffview.review")
+      if ok and dv_review.toggle_comment_fold then
+        dv_review.toggle_comment_fold()
+        return
+      end
     end
+    markers.toggle_at_cursor(ctx.bufnr, store, ctx.file, ctx.side, ctx.line)
   end, { buffer = bufnr, nowait = true, desc = "review: expand/collapse thread" })
   pcall(vim.keymap.set, "n", "]t", function() M.navigate_thread(1, false) end,
     { buffer = bufnr, desc = "review: next thread" })
