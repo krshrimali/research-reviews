@@ -483,3 +483,42 @@ describe("repeatable surfaces", function()
     assert.equals("review://performance", vim.api.nvim_buf_get_name(vim.api.nvim_get_current_buf()))
   end)
 end)
+
+describe("comments panel and window width", function()
+  it("comes back after the window is wide enough again", function()
+    -- Hiding without ever restoring meant one narrow moment lost the panel for the
+    -- rest of the review, with nothing on screen to explain it.
+    local review = require("review")
+    local config = require("review.config")
+    config.setup({ workspace = { comments_min_columns = 120 } })
+
+    review._panel_hidden_by_resize = false
+    local closed, opened = 0, 0
+    local panel = require("review.ui.comments_panel")
+    local real_close, real_open, real_is_open = panel.close, panel.open, panel.is_open
+    local open_state = true
+    panel.is_open = function() return open_state end
+    panel.close = function() closed = closed + 1; open_state = false end
+    panel.open = function() opened = opened + 1; open_state = true end
+    review.current = review.current or { store = {}, source = {} }
+
+    local columns = vim.o.columns
+    local function resize(n)
+      vim.o.columns = n
+      vim.api.nvim_exec_autocmds("VimResized", {})
+      vim.wait(20)
+    end
+
+    review.setup({ workspace = { comments_min_columns = 120 } })
+    resize(80)
+    assert.equals(1, closed)
+    assert.is_true(review._panel_hidden_by_resize)
+    resize(200)
+    assert.equals(1, opened)
+    assert.is_false(review._panel_hidden_by_resize)
+
+    vim.o.columns = columns
+    panel.close, panel.open, panel.is_open = real_close, real_open, real_is_open
+    review.current = nil
+  end)
+end)

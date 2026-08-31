@@ -395,6 +395,8 @@ function M.toggle_comments_panel(force_open)
   if force_open then
     panel.open(M.current.store, file, side, M.jump_to_thread)
   else
+    -- An explicit toggle is the user's call: a later resize must not undo it.
+    M._panel_hidden_by_resize = false
     panel.toggle(M.current.store, file, side, M.jump_to_thread)
   end
 end
@@ -1342,11 +1344,23 @@ function M.setup(opts)
     end,
   })
 
+  -- The panel is hidden when the window gets too narrow to hold it — and brought
+  -- back when there is room again. Closing without reopening meant one shrink lost
+  -- the panel for the rest of the review, with nothing to say why.
   vim.api.nvim_create_autocmd("VimResized", {
     group = group,
     callback = function()
-      if M.current and vim.o.columns < config.get().workspace.comments_min_columns then
-        require("review.ui.comments_panel").close()
+      if not M.current then return end
+      local panel = require("review.ui.comments_panel")
+      local min = config.get().workspace.comments_min_columns
+      if vim.o.columns < min then
+        if panel.is_open() then
+          M._panel_hidden_by_resize = true
+          panel.close()
+        end
+      elseif M._panel_hidden_by_resize and not panel.is_open() then
+        M._panel_hidden_by_resize = false
+        M.toggle_comments_panel(true)
       end
     end,
   })
