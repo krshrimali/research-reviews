@@ -158,6 +158,19 @@ function M._attach_diff_buffer(bufnr)
   pcall(vim.keymap.set, "n", "gO", function() M.open_at_commit(true) end,
     { buffer = bufnr, desc = "review: open file at reviewed commit in new tab" })
 
+  -- A reviewed revision is not editable, so leaving `o`/`O` native there only earns
+  -- a blocking "E21: Cannot make changes" on two of the most reflexive keys in Vim.
+  -- Say what to press instead. A working-tree diff IS modifiable and keeps them.
+  if not vim.bo[bufnr].modifiable then
+    for _, lhs in ipairs({ "o", "O" }) do
+      pcall(vim.keymap.set, "n", lhs, function()
+        util.notify("this revision is read-only · g" .. lhs
+          .. " opens the file at the reviewed commit · <leader>p for actions",
+          vim.log.levels.INFO)
+      end, { buffer = bufnr, nowait = true, desc = "review: read-only revision" })
+    end
+  end
+
   -- The keys the expanded-thread footer advertises. Buffer-local and thread-aware:
   -- with no thread under the cursor they fall through to their normal meaning.
   local function on_thread(fn, fallback)
