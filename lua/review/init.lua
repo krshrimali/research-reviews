@@ -169,6 +169,17 @@ function M.notify_change()
   if ok_diff then diff.refresh_markers(M.current.store) end
   local ok_panel, panel = pcall(require, "review.ui.comments_panel")
   if ok_panel and panel.is_open() then panel.refresh() end
+  -- Redraw the file tree so its viewed ticks and thread counts stay in step.
+  local ok_lib, lib = pcall(require, "diffview.lib")
+  if ok_lib then
+    local view = lib.get_current_view()
+    if view and view.panel and view.panel.render and view.panel.redraw then
+      pcall(function()
+        view.panel:render()
+        view.panel:redraw()
+      end)
+    end
+  end
   sync_diffview_github_comments(M.current, 0)
 end
 
@@ -514,6 +525,40 @@ function M.help()
   require("review.ui.help").open()
 end
 
+--- Show per-file review state in Diffview's file panel.
+---
+--- Viewed state and thread counts were only visible in review.nvim's own windows,
+--- while the file tree is where a reviewer actually decides what to open next.
+--- Registered once; it reads M.current on every draw, so it follows the review.
+local function register_file_decorator()
+  local ok, dv_review = pcall(require, "diffview.review_api")
+  if not ok or not dv_review.register_file_decorator then
+    return false
+  end
+  dv_review.register_file_decorator("review.nvim", function(path)
+    local current = M.current
+    if not current then return nil end
+    local store = current.store
+    local parts = {}
+    if store:is_viewed(path) then
+      parts[#parts + 1] = { text = "\u{2713}", hl = "DiffviewFilePanelInsertions" }
+    end
+    local open, resolved = 0, 0
+    for _, root in ipairs(store:threads_for_file(path)) do
+      if root.status == "resolved" then resolved = resolved + 1 else open = open + 1 end
+    end
+    if open > 0 then
+      parts[#parts + 1] = { text = "\u{1F4AC}" .. open, hl = "DiffviewFilePanelConflicts" }
+    elseif resolved > 0 then
+      parts[#parts + 1] = { text = "\u{2713}" .. resolved, hl = "DiffviewFilePanelInsertions" }
+    end
+    return parts
+  end)
+  return true
+end
+
+M._register_file_decorator = register_file_decorator
+
 --- Open a review for a source argument (PR number/url, branch, or ".").
 ---@param arg string|integer|table|nil
 ---@param opts table|nil { base=string }
@@ -609,11 +654,16 @@ function M.open_with_base(arg)
   local git = require("review.util.git")
   local choices = { "auto (merge-base with " .. git.default_branch(cwd) .. ")" }
   local refs = {}
+  -- `%(symref)` is non-empty for symbolic refs such as refs/remotes/origin/HEAD,
+  -- whose short name is a bare remote ("origin") and is not a base anyone means.
   local ok, out = require("review.util.proc").git(
-    { "for-each-ref", "--format=%(refname:short)", "refs/heads/", "refs/remotes/" }, cwd)
+    { "for-each-ref", "--format=%(refname:short)\t%(symref)", "refs/heads/", "refs/remotes/" }, cwd)
   if ok then
-    for name in vim.gsplit(out, "\n", { trimempty = true }) do
-      if not name:match("/HEAD$") then refs[#refs + 1] = name end
+    for line in vim.gsplit(out, "\n", { trimempty = true }) do
+      local name, symref = line:match("^([^\t]*)\t?(.*)$")
+      if name and name ~= "" and symref == "" and not name:match("/HEAD$") then
+        refs[#refs + 1] = name
+      end
     end
   end
   table.sort(refs)
@@ -742,15 +792,34 @@ function M.sync_claude_result()
   local session = sessions[1]
   if not session then util.notify("no Claude review session to synchronize", vim.log.levels.INFO); return end
   session.replied, session.findings = session.replied or {}, session.findings or {}
-  local text = require("review.sidekick").transcript_result(
+  local sidekick = require("review.sidekick")
+  local source = "transcript"
+  local text = sidekick.transcript_result(
     M.current.source, session.cwd or M.current.source:metadata().repo_root)
+  if not text or text == "" then
+    -- No persisted transcript. Say why, then try the terminal the agent is still
+    -- sitting in rather than reporting a bare "empty result".
+    local reason = sidekick.transcript_unavailable_reason()
+    text = sidekick.terminal_text(session)
+    source = "terminal"
+    if not text or text == "" then
+      util.notify("no Claude output to synchronize"
+        .. (reason and (" — " .. reason) or " — the transcript is empty and no agent terminal is open"),
+        vim.log.levels.ERROR)
+      return
+    end
+    util.notify("no saved transcript"
+      .. (reason and (" (" .. reason .. ")") or "")
+      .. " — reading the agent terminal instead", vim.log.levels.WARN)
+  end
   local findings, err = require("review.claude.contract").extract_findings(text)
   if not findings then
-    util.notify("could not synchronize Claude findings: " .. tostring(err), vim.log.levels.ERROR)
+    util.notify(string.format("could not synchronize Claude findings from the %s: %s",
+      source, tostring(err)), vim.log.levels.ERROR)
     return
   end
   require("review.sidekick").apply_findings(M.current.store, M.current.source, session, findings)
-  session.state, session.progress = "done", "Findings imported from transcript"
+  session.state, session.progress = "done", "Findings imported from the " .. source
   session.error = nil
   M.current.store.sessions[session.id] = session
   M.current.store:save()
@@ -800,6 +869,7 @@ local function open_final_prompt(instruction, allow_edits, threads)
   require("review.ui.prompt").open(prompt, { on_run = function(final)
     local session, err = sidekick.run(M.current.source, M.current.store, final, {
       allow_edits = allow_edits,
+      instruction = instruction,
       auto_resolve = config.get().claude.auto_resolve,
       on_progress = function() require("review.ui.diff").refresh_markers(M.current.store) end,
       on_done = function(done)
@@ -1236,6 +1306,8 @@ function M.setup(opts)
   if km.menu then
     vim.keymap.set("n", km.menu, M.menu, { desc = "review: actions menu" })
   end
+
+  register_file_decorator()
 
   local group = vim.api.nvim_create_augroup("ReviewNvim", { clear = true })
 

@@ -137,6 +137,57 @@ local function render_groups(groups, lines, map, store, selected)
   end
 end
 
+--- PR-level comments and review summaries — everything that is NOT anchored to a
+--- diff line. These were only visible in the workspace, so a conversation happening
+--- on the pull request itself was invisible from the surface you actually work in.
+---@param store table
+---@param query string
+---@return table[]
+local function conversation_items(store, query)
+  local source = store.source
+  if not source or type(source.conversation) ~= "function" then
+    return {}
+  end
+  local ok, items = pcall(source.conversation, source)
+  if not ok or type(items) ~= "table" then
+    return {}
+  end
+  if query and query ~= "" then
+    items = vim.tbl_filter(function(item)
+      local haystack = ((item.author or "") .. " " .. (item.body or "")):lower()
+      return haystack:find(query:lower(), 1, true) ~= nil
+    end, items)
+  end
+  return items
+end
+
+M._conversation_items = conversation_items
+
+--- Render the non-inline conversation.
+local function render_conversation(items, lines, map)
+  if #items == 0 then
+    return
+  end
+  lines[#lines + 1] = ("▾ conversation (%d) · not on a line"):format(#items)
+  for _, item in ipairs(items) do
+    local kind = item.kind == "review" and (item.state or "review") or "comment"
+    lines[#lines + 1] = ("  ◆ @%s · %s"):format(item.author or "unknown", kind:lower())
+    map[#lines] = { conversation = item }
+    local body = vim.split(util.normalize_markdown(item.body), "\n", { plain = true })
+    for index = 1, math.min(#body, 4) do
+      if vim.trim(body[index]) ~= "" then
+        lines[#lines + 1] = "      " .. body[index]
+        map[#lines] = { conversation = item }
+      end
+    end
+    if #body > 4 then
+      lines[#lines + 1] = ("      … %d more lines"):format(#body - 4)
+      map[#lines] = { conversation = item }
+    end
+  end
+  lines[#lines + 1] = ""
+end
+
 --- Running-agent status, so the panel where findings will land also says one is coming.
 ---@param store table
 ---@return string|nil
@@ -177,6 +228,11 @@ local function build(store, file, filter, query, selected)
     table.insert(lines, "(no matching threads)")
   end
   render_groups(group_by_file(threads), lines, map, store, selected)
+  -- Conversation last: inline threads are the working set, this is context.
+  if not file then
+    lines[#lines + 1] = ""
+    render_conversation(conversation_items(store, query), lines, map)
+  end
   local general = {}
   for _, session in pairs(store.sessions or {}) do
     for _, finding in ipairs(session.findings or {}) do
@@ -272,6 +328,12 @@ function M.open(store, file, side, on_jump)
   local function under_cursor()
     return st.line_map[vim.api.nvim_win_get_cursor(0)[1]]
   end
+  --- The thread under the cursor, or nil when the row is a conversation entry.
+  local function thread_under_cursor()
+    local row = under_cursor()
+    if not row or row.conversation then return nil end
+    return row
+  end
   local function selected_roots()
     local roots = {}
     for id in pairs(st.selected) do
@@ -285,19 +347,26 @@ function M.open(store, file, side, on_jump)
   end
 
   map("<CR>", function()
-    local root = under_cursor()
-    if root and st.on_jump then st.on_jump(root) end
-  end, "jump to thread")
+    local row = under_cursor()
+    if not row then return end
+    if row.conversation then
+      -- Not anchored to a line, so there is nowhere in the diff to jump to; open
+      -- the full conversation view instead.
+      require("review").open_workspace("Conversation")
+      return
+    end
+    if st.on_jump then st.on_jump(row) end
+  end, "jump to thread, or open the conversation")
   map("r", function()
-    local root = under_cursor()
+    local root = thread_under_cursor()
     if root then require("review").resolve_thread(root) end
   end, "resolve / unresolve")
   map("R", function()
-    local root = under_cursor()
+    local root = thread_under_cursor()
     if root then require("review").reply_thread(root) end
   end, "reply")
   map("<Space>", function()
-    local root = under_cursor()
+    local root = thread_under_cursor()
     if root then
       st.selected[root.id] = not st.selected[root.id] or nil
       render_state(st)
@@ -333,7 +402,7 @@ function M.open(store, file, side, on_jump)
   end, "search")
   map("a", function()
     local roots = selected_roots()
-    local under = under_cursor()
+    local under = thread_under_cursor()
     if #roots == 0 and under then roots = { under } end
     if #roots > 0 then require("review").ask_claude_threads(roots) end
   end, "ask Claude about threads")
@@ -342,19 +411,21 @@ function M.open(store, file, side, on_jump)
     if #roots == 0 then roots = st.store:all_threads() end
     require("review").publish_threads(roots)
   end, "publish drafts")
-  map("z", function() require("review").react_to_thread(under_cursor()) end, "react")
+  map("z", function() require("review").react_to_thread(thread_under_cursor()) end, "react")
   map("I", function() require("review").import_github_comments() end, "import GitHub comments")
   map("A", function()
-    local root = under_cursor()
+    local root = thread_under_cursor()
     if root then require("review").apply_suggestion(root) end
   end, "apply suggestion to the working tree")
   map("Q", function()
     local roots = {}
-    for _, root in pairs(st.line_map) do roots[root.id] = root end
+    for _, row in pairs(st.line_map) do
+      if not row.conversation then roots[row.id] = row end
+    end
     require("review").threads_to_quickfix(vim.tbl_values(roots))
   end, "export to quickfix")
   map("d", function()
-    local root = under_cursor()
+    local root = thread_under_cursor()
     if not root then return end
     require("review.ui.menu").confirm("Delete this local thread?", "Delete", function()
       st.store:delete(root.id)
@@ -362,7 +433,7 @@ function M.open(store, file, side, on_jump)
     end)
   end, "delete thread")
   map("e", function()
-    local root = under_cursor()
+    local root = thread_under_cursor()
     if not root then return end
     if root.github_id then
       util.notify("Published GitHub comments cannot be edited locally", vim.log.levels.WARN)
@@ -374,7 +445,7 @@ function M.open(store, file, side, on_jump)
     end })
   end, "edit thread")
   map("y", function()
-    local root = under_cursor()
+    local root = thread_under_cursor()
     if not root then return end
     local out = { string.format("%s:%d", root.file, root.line_start or 0), root.body }
     for _, reply in ipairs(st.store:replies(root.id)) do

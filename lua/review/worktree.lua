@@ -136,8 +136,13 @@ end
 ---@param path string
 ---@return boolean
 local function has_unsaved_work(path)
-  -- Commits in this worktree's HEAD not reachable from any branch/remote.
-  local ok, out = proc.git({ "log", "--oneline", "HEAD", "--not", "--all" }, path)
+  -- Commits on this worktree's HEAD that no branch, remote or tag can reach.
+  --
+  -- NOT `--not --all`: `--all` includes the HEAD of this very worktree, so a commit
+  -- that exists *only* here always looked reachable and the guard could never fire.
+  -- An agent's committed work was then removed by a routine prune.
+  local ok, out = proc.git(
+    { "log", "--oneline", "HEAD", "--not", "--branches", "--remotes", "--tags" }, path)
   if ok and out and out:gsub("%s+", "") ~= "" then
     return true
   end

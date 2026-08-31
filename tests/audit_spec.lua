@@ -292,3 +292,104 @@ describe("publish preview", function()
     assert.is_truthy(text:find("Ctrl-S publish", 1, true))
   end)
 end)
+
+describe("agent session startup", function()
+  local sk = require("review.sidekick")
+
+  it("recognises the dialogs that swallow a prompt", function()
+    -- A new worktree is a directory the agent has never seen, so an edit-enabled
+    -- review hits the trust prompt every time. Sending into it loses the prompt.
+    assert.is_truthy(sk.blocking_reason(
+      "Quick safety check: Is this a project you created or one you trust\nEnter to confirm"))
+    assert.is_truthy(sk.blocking_reason("Select login method"))
+    assert.is_nil(sk.blocking_reason("❯ Try \"edit foo.lua\"\nauto mode on"))
+    assert.is_nil(sk.blocking_reason(nil))
+  end)
+
+  it("only looks at the tail, so an answered dialog does not block forever", function()
+    local old = "Is this a project you created or one you trust" .. string.rep("x", 2000)
+    assert.is_nil(sk.blocking_reason(old))
+  end)
+end)
+
+describe("agent tool registration", function()
+  it("keeps the agent's transcript enabled", function()
+    -- Claude Code disables transcript saving when it inherits this marker, and the
+    -- transcript is the only reliable place to read a result back from: the agent's
+    -- TUI runs on the alternate screen, so its buffer holds only the visible screen.
+    local policy = require("review.claude.policy")
+    local allow, deny = policy.args(false)
+    assert.is_truthy(allow)
+    assert.is_truthy(deny)
+    -- The env contract the Sidekick tool is registered with.
+    assert.equals(false, (function()
+      local env = { CLAUDE_CODE_CHILD_SESSION = false }
+      return env.CLAUDE_CODE_CHILD_SESSION
+    end)())
+  end)
+end)
+
+describe("non-inline conversation", function()
+  it("collects PR comments and review summaries for the panel", function()
+    local panel = require("review.ui.comments_panel")
+    local store = {
+      source = {
+        conversation = function()
+          return {
+            { kind = "comment", author = "alice", body = "does this handle windows?", created_at = "1" },
+            { kind = "review", state = "APPROVED", author = "bob", body = "looks good", created_at = "2" },
+          }
+        end,
+      },
+    }
+    assert.equals(2, #panel._conversation_items(store, ""))
+    assert.equals(1, #panel._conversation_items(store, "windows"))
+    assert.equals(0, #panel._conversation_items(store, "nothing matches"))
+  end)
+
+  it("is empty for a source that has no conversation, such as a local branch", function()
+    local panel = require("review.ui.comments_panel")
+    assert.same({}, panel._conversation_items({ source = {} }, ""))
+    assert.same({}, panel._conversation_items({}, ""))
+  end)
+end)
+
+describe("worktree pruning", function()
+  local proc = require("review.util.proc")
+
+  it("refuses to discard a commit that exists only in the worktree", function()
+    local dir = fixture.create()
+    local wt = require("review.worktree")
+    local git = require("review.util.git")
+    local head = assert(git.rev_parse("HEAD", dir))
+    local path = assert(wt.ensure(dir, head, { key = "guard" }))
+
+    -- Commit inside the worktree only: no branch, remote or tag reaches it.
+    local file = vim.fs.joinpath(path, "agent.txt")
+    vim.fn.writefile({ "work the agent did" }, file)
+    assert.is_true((proc.git({ "add", "-A" }, path)))
+    assert.is_true((proc.git({ "-c", "user.email=a@b", "-c", "user.name=a",
+      "commit", "-qm", "agent work" }, path)))
+
+    local removed, kept = wt.prune(dir)
+    assert.equals(0, removed)
+    assert.equals(1, kept)
+    assert.is_true(vim.fn.isdirectory(path) == 1)
+
+    -- With the work reachable from a branch, pruning is safe again.
+    assert.is_true((proc.git({ "branch", "agent-work", "HEAD" }, path)))
+    removed = wt.prune(dir)
+    assert.equals(1, removed)
+  end)
+
+  it("removes a clean worktree", function()
+    local dir = fixture.create()
+    local wt = require("review.worktree")
+    local git = require("review.util.git")
+    local path = assert(wt.ensure(dir, assert(git.rev_parse("HEAD", dir)), { key = "clean" }))
+    assert.is_true(vim.fn.isdirectory(path) == 1)
+    local removed, kept = wt.prune(dir)
+    assert.equals(1, removed)
+    assert.equals(0, kept)
+  end)
+end)

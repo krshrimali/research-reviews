@@ -39,8 +39,125 @@ function M.ensure_tool(allow_edits)
     cmd = cmd,
     -- The process still *is* claude, so reuse claude's process matcher.
     is_proc = (base.config or {}).is_proc or "claude",
+    -- Claude Code turns OFF transcript saving when it sees this marker, which it
+    -- inherits whenever Neovim was itself started from an agent terminal. The
+    -- transcript is the only reliable place to read a review result back from — the
+    -- agent's TUI runs on the alternate screen, so its terminal buffer holds just
+    -- the visible screen and any result longer than that is simply gone. Clear the
+    -- marker for the child (sidekick treats `false` as "unset this variable").
+    env = vim.tbl_extend("force", vim.deepcopy((base.config or {}).env or {}), {
+      CLAUDE_CODE_CHILD_SESSION = false,
+    }),
   })
   return name, true
+end
+
+---Why no transcript is available, in words a user can act on.
+---
+---Claude Code disables transcript saving when it detects it was started from inside
+---another Claude session (`CLAUDE_CODE_CHILD_SESSION`), which is exactly what
+---happens when Neovim is launched from an agent terminal. Sync then finds nothing
+---and used to report only "empty result".
+---@return string|nil reason
+function M.transcript_unavailable_reason()
+  local ok, model = pcall(require, "sidekick.review.model")
+  if not ok or type(model.sessions) ~= "function" then
+    return "sidekick.nvim does not expose a transcript model"
+  end
+  if (vim.env.CLAUDE_CODE_CHILD_SESSION or "") ~= "" then
+    return "CLAUDE_CODE_CHILD_SESSION is set, so the agent did not save a transcript"
+      .. " (this Neovim was started from inside another Claude session)"
+  end
+  return nil
+end
+
+---The agent's visible terminal output for a session, as a fallback when no
+---transcript was persisted. Terminal cells are display-reflowed, so long JSON can
+---arrive split; this is a last resort, not the primary path.
+---@param session table
+---@return string|nil
+function M.terminal_text(session)
+  local live = M.pollers[session.id]
+  local terminal = live and live.terminal
+  if not terminal then
+    -- Fall back to any Sidekick terminal buffer still open for this tool.
+    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+      if vim.api.nvim_buf_is_valid(buf) and vim.bo[buf].filetype == "sidekick_terminal" then
+        return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+      end
+    end
+    return nil
+  end
+  local buf = terminal.buf
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return nil end
+  return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+end
+
+--- Dialogs the agent shows before it will accept any input. A new worktree is a
+--- directory the CLI has never seen, so an edit-enabled review hits the trust prompt
+--- every single time.
+local BLOCKING_PROMPTS = {
+  { pattern = "Is this a project you created or one you trust", reason = "the agent is asking you to trust this worktree" },
+  { pattern = "Do you want to proceed", reason = "the agent is waiting on a confirmation" },
+  { pattern = "Enter to confirm", reason = "the agent is showing a confirmation dialog" },
+  { pattern = "Select login method", reason = "the agent needs you to log in" },
+  { pattern = "Invalid API key", reason = "the agent could not authenticate" },
+}
+
+---Why the agent cannot accept input yet, if it cannot.
+---@param text string|nil
+---@return string|nil reason
+function M.blocking_reason(text)
+  if not text or text == "" then return nil end
+  -- Only the tail matters: an answered dialog stays in the scrollback forever.
+  local tail = text:sub(-1200)
+  for _, entry in ipairs(BLOCKING_PROMPTS) do
+    if tail:find(entry.pattern, 1, true) then return entry.reason end
+  end
+  return nil
+end
+
+---Press Enter in the agent's terminal.
+---
+---`session:submit()` is the documented way, but it guards on `is_running()` and was
+---observed to no-op for a live terminal-backed session — the prompt then sat in the
+---input box forever. Writing the carriage return to the channel ourselves is what
+---a keypress does anyway, so try both.
+---@param state table sidekick cli state
+---@return boolean
+function M.press_enter(state)
+  pcall(function() state.session:submit() end)
+  local buf = state.terminal and state.terminal.buf
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return false end
+  local chan = vim.bo[buf].channel
+  if not chan or chan == 0 then return false end
+  return pcall(vim.api.nvim_chan_send, chan, "\r")
+end
+
+---Make sure a submitted prompt actually left the input box, re-pressing Enter if
+---the paste marker is still sitting there.
+---@param state table sidekick cli state
+---@param session table
+---@param attempt integer
+function M.confirm_submitted(state, session, attempt)
+  if session.state ~= "running" then return end
+  local buf = state.terminal and state.terminal.buf
+  if not buf or not vim.api.nvim_buf_is_valid(buf) then return end
+  local tail = table.concat(vim.api.nvim_buf_get_lines(buf, -25, -1, false), "\n")
+  local still_queued = tail:find("Pasted text", 1, true)
+    or tail:find("You are performing a code review", 1, true)
+  if not still_queued then
+    session.prompt_sent = true
+    session.progress = "Prompt sent"
+    return
+  end
+  if attempt > 5 then
+    util.notify("the review prompt is still in the agent's input box — press Enter in the chat",
+      vim.log.levels.WARN)
+    return
+  end
+  M.press_enter(state)
+  vim.defer_fn(function() M.confirm_submitted(state, session, attempt + 1) end, 900)
 end
 
 ---Read the agent's exact persisted transcript instead of terminal cells. Terminal
@@ -183,15 +300,55 @@ function M.run(source, store, prompt, opts)
     replied = {}, findings = {}, log = {}, applied = false,
     sidekick_id = state.session.id, backend = "sidekick", retry_prompt = prompt,
     tool = tool_name, restricted = restricted,
+    -- Recorded so the sessions view can say what this run was asked to do, and so a
+    -- retry reproduces the same request rather than a bare review.
+    instruction = opts.instruction or "",
     started_epoch = os.time(),
   }
   store.sessions[id] = session
   store:save()
 
-  vim.schedule(function()
+  -- Send only once the agent can actually receive. Sending immediately typed the
+  -- whole review prompt into whatever dialog happened to be up — most often the
+  -- trust prompt for the freshly created worktree — and the prompt was simply lost
+  -- while the session sat at "Starting agent" until it timed out.
+  local function terminal_text()
+    local buf = state.terminal and state.terminal.buf
+    if not buf or not vim.api.nvim_buf_is_valid(buf) then return "" end
+    return table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), "\n")
+  end
+
+  local warned
+  local function send_prompt(attempt)
+    if session.state ~= "running" or session.prompt_sent then return end
+    local blocked = M.blocking_reason(terminal_text())
+    if blocked then
+      if warned ~= blocked then
+        warned = blocked
+        session.progress = "Waiting: " .. blocked
+        util.notify(blocked .. " — answer it in the chat and the review will be sent",
+          vim.log.levels.WARN)
+      end
+      if attempt < 300 then
+        vim.defer_fn(function() send_prompt(attempt + 1) end, 1000)
+      else
+        session.state, session.progress = "error", "Agent never became ready"
+        session.error = blocked
+        store.sessions[id] = session; store:save(); M.pollers[id] = nil
+        if opts.on_done then opts.on_done(session) end
+      end
+      return
+    end
+    -- A long prompt arrives as one bracketed paste, which the agent's TUI shows as
+    -- "[Pasted text #1 +N lines]" and is still debouncing when an immediate \r
+    -- lands — so the prompt sat in the input box, unsent, and the session waited
+    -- forever. Submit after a beat, then confirm it actually left the box.
     local sent, err = pcall(function()
-      state.session:send(prompt .. "\n")
-      state.session:submit()
+      state.session:send(prompt)
+      vim.defer_fn(function()
+        M.press_enter(state)
+        M.confirm_submitted(state, session, 1)
+      end, 500)
     end)
     if not sent then
       session.state, session.progress = "error", "Could not send prompt to Sidekick"
@@ -199,8 +356,13 @@ function M.run(source, store, prompt, opts)
       store.sessions[id] = session; store:save(); M.pollers[id] = nil
       if opts.on_done then opts.on_done(session) end
       util.notify("Sidekick send failed: " .. tostring(err), vim.log.levels.ERROR)
+      return
     end
-  end)
+    session.progress = "Prompt sent"
+    if warned then util.notify("agent is ready; review prompt sent") end
+  end
+
+  vim.defer_fn(function() send_prompt(1) end, 400)
 
   -- Sidekick deliberately owns the interactive terminal. We watch its scrollback
   -- for the structured result contract and import it back into review.nvim.
@@ -244,6 +406,15 @@ function M.run(source, store, prompt, opts)
         if opts.on_progress then opts.on_progress(session) end
       end
     end
+    -- The agent's TUI leaves no scrollback, so a result that scrolled past the
+    -- viewport cannot be recovered from the buffer. If the transcript is also
+    -- unavailable, say so once instead of polling until the timeout.
+    if not exact and ticks == 20 and M.transcript_unavailable_reason() then
+      session.progress = "No transcript; findings cannot be auto-imported"
+      util.notify("this agent is not saving a transcript, so findings cannot be imported"
+        .. " automatically — run :ReviewSync while the result is still on screen",
+        vim.log.levels.WARN)
+    end
     if terminal and not terminal:is_running() then
       local _, parse_err = require("review.claude.contract").extract_findings(exact or text)
       session.state, session.progress = "error", "Review finished, but findings could not be imported"
@@ -268,7 +439,7 @@ function M.run(source, store, prompt, opts)
     if ticks % 3 == 0 then store.sessions[id] = session; store:save() end
     vim.defer_fn(tick, 1500)
   end
-  M.pollers[id] = { session = session, store = store }
+  M.pollers[id] = { session = session, store = store, terminal = state.terminal }
   vim.defer_fn(tick, 1000)
   return session
 end
