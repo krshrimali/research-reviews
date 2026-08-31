@@ -628,7 +628,6 @@ local function realize_review(source, started)
 
   if config.get().workspace.dedicated_tab then vim.cmd("tabnew") end
   M.current = { source = source, store = store }
-  M.bind_tab(vim.api.nvim_get_current_tabpage(), M.current)
 
   -- Every PR open performs a fresh, read-only GitHub thread fetch. Existing
   -- store entries are retained if GitHub is temporarily unavailable.
@@ -643,6 +642,9 @@ local function realize_review(source, started)
   -- The diff is the ONE default surface (diffview + inline comments). The workspace
   -- tab and comments panel are opt-in via the menu (<leader>p → O / P).
   require("review.ui.diff").open(source)
+  -- Bound only now: Diffview opens a tab of its own, so the review does not live in
+  -- the tab that existed a moment ago.
+  M.bind_tab(vim.api.nvim_get_current_tabpage(), M.current)
   vim.defer_fn(function() sync_diffview_github_comments(M.current, 0) end, 50)
 
   if config.get().workspace.comments and vim.o.columns >= config.get().workspace.comments_min_columns then
