@@ -74,7 +74,7 @@ function M.open(payload, drafts, on_submit, opts)
   opts = opts or {}
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].filetype = "nofile", "wipe", "markdown"
-  pcall(vim.api.nvim_buf_set_name, buf, "review://publish-preview")
+  util.name_buffer(buf, "review://publish-preview")
   vim.cmd("botright split")
   local win = vim.api.nvim_get_current_win()
   vim.api.nvim_win_set_buf(win, buf)

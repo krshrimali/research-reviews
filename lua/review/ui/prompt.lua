@@ -12,7 +12,7 @@ function M.open(text, opts)
   end
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].filetype = "acwrite", "wipe", "markdown"
-  vim.api.nvim_buf_set_name(buf, "review://prompt/" .. util.uuid():sub(1, 8))
+  util.name_buffer(buf, "review://prompt/" .. util.uuid():sub(1, 8))
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, vim.split(text, "\n", { plain = true }))
   vim.cmd("botright split")
   local win = vim.api.nvim_get_current_win()

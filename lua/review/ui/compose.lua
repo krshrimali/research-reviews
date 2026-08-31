@@ -18,7 +18,7 @@ function M.open(opts)
   vim.bo[buf].buftype = "acwrite"
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].filetype = "markdown"
-  vim.api.nvim_buf_set_name(buf, "review://compose/" .. util.uuid():sub(1, 8))
+  util.name_buffer(buf, "review://compose/" .. util.uuid():sub(1, 8))
 
   local header = {}
   table.insert(header, "<!-- " .. (opts.title or "Comment")

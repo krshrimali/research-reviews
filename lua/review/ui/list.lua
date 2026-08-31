@@ -210,7 +210,7 @@ local function open_browser(cwd, opts, on_choose)
   vim.bo[buf].filetype = "review-sources"
   vim.wo.wrap, vim.wo.linebreak = false, false
   vim.wo.cursorline = true
-  vim.api.nvim_buf_set_name(buf, "review://sources/" .. util.hash(cwd) .. "/" .. model.source)
+  util.name_buffer(buf, "review://sources/" .. util.hash(cwd) .. "/" .. model.source)
 
   local timer
   local function render()

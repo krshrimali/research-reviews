@@ -36,7 +36,7 @@ function M.list(store)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].filetype = "review-sessions"
-  vim.api.nvim_buf_set_name(buf, "review://sessions/" .. util.hash(store.source_key))
+  util.name_buffer(buf, "review://sessions/" .. util.hash(store.source_key))
 
   local lines, map = { "Claude reviews", string.rep("─", 40) }, {}
   if #sessions == 0 then
@@ -103,7 +103,7 @@ function M.detail(s, store)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].filetype = "markdown"
-  vim.api.nvim_buf_set_name(buf, "review://session/" .. s.id:sub(1, 8))
+  util.name_buffer(buf, "review://session/" .. s.id:sub(1, 8))
 
   local lines = {
     "# Claude review " .. s.id:sub(1, 8),

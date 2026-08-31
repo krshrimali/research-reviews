@@ -85,7 +85,7 @@ end
 function M.open()
   vim.cmd("tabnew")
   local buf = vim.api.nvim_get_current_buf()
-  vim.api.nvim_buf_set_name(buf, "review://help")
+  require("review.util").name_buffer(buf, "review://help")
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].swapfile = false

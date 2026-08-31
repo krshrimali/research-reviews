@@ -301,7 +301,7 @@ function M.open(store, file, side, on_jump)
   vim.bo[buf].buftype = "nofile"
   vim.bo[buf].bufhidden = "wipe"
   vim.bo[buf].filetype = "review-comments"
-  pcall(vim.api.nvim_buf_set_name, buf, "review://comments-panel/" .. tab)
+  util.name_buffer(buf, "review://comments-panel/" .. tab)
 
   vim.cmd("botright vsplit")
   local win = vim.api.nvim_get_current_win()

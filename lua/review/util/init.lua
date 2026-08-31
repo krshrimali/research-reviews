@@ -165,6 +165,24 @@ function M.select(items, opts, on_choice)
   vim.ui.select(items, opts, on_choice)
 end
 
+--- Give a scratch buffer a stable `review://` name.
+---
+--- Neovim refuses a name another buffer already holds (E95), so any surface with a
+--- fixed name — the help tab, the profile, the workspace — threw the second time it
+--- was opened. The stale buffer is wiped first; it is always one of ours.
+---@param buf integer
+---@param name string
+---@return boolean named
+function M.name_buffer(buf, name)
+  for _, other in ipairs(vim.api.nvim_list_bufs()) do
+    if other ~= buf and vim.api.nvim_buf_is_valid(other)
+        and vim.api.nvim_buf_get_name(other) == name then
+      pcall(vim.api.nvim_buf_delete, other, { force = true })
+    end
+  end
+  return (pcall(vim.api.nvim_buf_set_name, buf, name))
+end
+
 --- Return true and the module if `require(name)` succeeds, else false, err.
 ---@param name string
 ---@return boolean ok, any mod_or_err

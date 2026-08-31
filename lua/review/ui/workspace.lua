@@ -236,7 +236,7 @@ end
 function M.open(source, store, mode)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.cmd("tabnew"); vim.api.nvim_win_set_buf(0, buf)
-  vim.api.nvim_buf_set_name(buf, "review://workspace/" .. util.hash(source:key()))
+  util.name_buffer(buf, "review://workspace/" .. util.hash(source:key()))
   vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].filetype = "nofile", "wipe", "markdown"
   vim.wo.wrap, vim.wo.linebreak, vim.wo.breakindent = true, true, true
   local st = { source = source, store = store, mode = mode or "Conversation", buf = buf }

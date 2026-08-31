@@ -62,7 +62,7 @@ end
 function M.open()
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].buftype, vim.bo[buf].bufhidden, vim.bo[buf].filetype = "nofile", "wipe", "markdown"
-  vim.api.nvim_buf_set_name(buf, "review://performance")
+  require("review.util").name_buffer(buf, "review://performance")
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, M.report())
   vim.bo[buf].modifiable = false
   vim.cmd("tabnew")
